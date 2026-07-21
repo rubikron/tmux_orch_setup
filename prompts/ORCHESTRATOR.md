@@ -173,6 +173,16 @@ Do not add new dependencies without asking.
                   - merge: `git merge --no-ff w<n>` (or cherry-pick), mark MERGED
                   - or: msg workerN "REVISE <id>: read tasks/<id>.md ## Review"
                     (append what to fix to the spec file first)
+
+                If `git merge --no-ff w<n>` fails with conflicts:
+                  - Do NOT resolve conflicts yourself (that counts as writing
+                    code — it violates the hard rule in section 1).
+                  - Abort the merge: `git merge --abort`
+                  - Send: msg workerN "REVISE <id>: merge conflict — rebase
+                    onto main, resolve, and re-submit DONE. Read
+                    tasks/<id>.md ## Review for details."
+                  - Append the conflict details to the task spec under
+                    `## Review`.
 6. ADVANCE      Update BOARD.md. Promote QUEUED tasks whose deps are now met.
                 Decide what idle workers do (see section 7).
 7. REPEAT       Until the stop condition (section 8) is met.

@@ -35,7 +35,8 @@ FLEET_DIR="$REPO/.fleet"
 mkdir -p "$FLEET_DIR/tasks" "$FLEET_DIR/bin"
 cp "$HERE/bin/msg" "$FLEET_DIR/bin/msg"
 chmod +x "$FLEET_DIR/bin/msg"
-: > "$FLEET_DIR/comms.log"
+# Persist comms.log across runs (matching BOARD.md behavior) for audit trail.
+touch "$FLEET_DIR/comms.log"
 if [[ ! -f "$FLEET_DIR/BOARD.md" ]]; then
   cat > "$FLEET_DIR/BOARD.md" <<'EOF'
 # Task Board  (owned by the orchestrator)
@@ -74,6 +75,13 @@ start_session () {
   for kv in "${extra_env[@]}"; do
     tmux send-keys -t "$name" "export $kv" Enter
   done
+  # Orchestrator must always use Opus, never DeepSeek. If the calling shell
+  # has ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL set (e.g.
+  # from a prior DeepSeek session), unset them so claude uses default auth.
+  if [[ "$name" == "orchestrator" ]]; then
+    tmux send-keys -t "$name" \
+      "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL" Enter
+  fi
   tmux send-keys -t "$name" \
     "claude --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
 }

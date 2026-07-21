@@ -12,7 +12,13 @@ done
 
 for i in 1 2 3; do
   wt="$WT_ROOT/worker$i"
-  [[ -d "$wt" ]] && git -C "$REPO" worktree remove --force "$wt" && echo "removed worktree $wt" || true
+  if [[ -d "$wt" ]]; then
+    if git -C "$REPO" worktree remove "$wt"; then
+      echo "removed worktree $wt"
+    else
+      echo "warning: worktree $wt has uncommitted changes — commit/stash inside it, or re-run with 'git worktree remove --force $wt' if you're sure" >&2
+    fi
+  fi
 done
 
 echo "Done. Worker branches w1/w2/w3 kept. Coordination dir left at $REPO/.fleet"

@@ -18,6 +18,13 @@ target="$1"; shift
 sender="$(tmux display-message -p '#S' 2>/dev/null || echo human)"
 line="[$sender -> $target] $*"
 
+# Reject embedded newlines — they would submit a partial line as its own
+# Enter-terminated input, silently breaking the one-message-one-line invariant.
+if [[ "$line" == *$'\n'* ]]; then
+  echo "msg: message contains embedded newlines — put multi-line content in a task file, not a message" >&2
+  exit 1
+fi
+
 # Control plane: inject the message as a user turn in the target session.
 # -l (literal) stops tmux from interpreting characters as key names.
 tmux send-keys -t "$target" -l "$line"

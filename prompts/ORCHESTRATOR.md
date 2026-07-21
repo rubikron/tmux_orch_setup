@@ -33,6 +33,20 @@ It contains:
 - `tasks/<id>.md` — one file per task spec (you write these).
 - `comms.log` — an append-only log of every message. Read it to see peer chatter.
 
+**BOARD.md format** — you maintain this table. Add one row per task:
+
+```
+# id     state    assignee  files                    notes
+# ------ -------- --------- ------------------------ -----------------------------
+```
+
+- `id` — task identifier (`t-001`, `t-002`, …).
+- `state` — `QUEUED`, `ACTIVE`, `BLOCKED`, or `MERGED`.
+- `assignee` — `worker1`, `worker2`, `worker3`, or empty while queued.
+- `files` — comma-separated list of files this task touches. Used to detect
+  same-file contention before assigning (see section 4 item 4).
+- `notes` — dependencies, REVISE count, issue references, or free-form context.
+
 **Sending a message** — use the `msg` command from your shell:
 ```
 msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
@@ -85,6 +99,9 @@ Your default is **one worker.** Fan out only when it clearly pays off.
 
 4. **Same-file contention** — two candidate steps edit the same file:
    → **serialize** them onto one worker rather than causing a merge fight.
+   Before assigning, check `BOARD.md`'s `files` column — if any `ACTIVE` task
+   already claims a file you're about to assign, serialize onto that same
+   worker (or wait for the active task to merge).
 
 Heuristic: *fan out only when the parallel parts are genuinely independent AND
 each is worth ~5+ minutes of work.* Below that bar, coordination overhead makes
@@ -137,14 +154,35 @@ Do not add new dependencies without asking.
                 architecture sketch and an ordered task breakdown.
 2. RECORD       Write/refresh BOARD.md with every task, its state, deps.
 3. ASSIGN       Pick the next ready task(s) per the decision tree.
+                If the task depends on work that was merged since the
+                worker's branch was last synced, sync first:
+                  `git -C <worker-worktree-path> merge main` (or rebase).
                 Write tasks/<id>.md, then: msg workerN "TASK <id>: read <path>"
-                Update BOARD.md: <id> -> ACTIVE, assignee, branch.
+                Update BOARD.md: <id> -> ACTIVE, assignee, branch, files.
 4. SUPPORT      Answer ASKs fast (msg workerN "ANS <id>: ..."). Unblock
                 BLOCKED workers. Scan comms.log for peer threads needing you.
-5. REVIEW       On DONE, read `git diff main..w<n>`. Then either:
+5. REVIEW       On DONE, read `git diff main..w<n>`.
+                Before merging, verify the branch passes tests independently:
+                  git checkout w<n>
+                  <run the project's test/build command>
+                  git checkout main
+                If you don't know the test command, ask the human on first use
+                or detect it from package.json / Makefile / Cargo.toml / etc.
+                If tests fail, REVISE instead of merging (see below).
+                Then either:
                   - merge: `git merge --no-ff w<n>` (or cherry-pick), mark MERGED
                   - or: msg workerN "REVISE <id>: read tasks/<id>.md ## Review"
                     (append what to fix to the spec file first)
+
+                If `git merge --no-ff w<n>` fails with conflicts:
+                  - Do NOT resolve conflicts yourself (that counts as writing
+                    code — it violates the hard rule in section 1).
+                  - Abort the merge: `git merge --abort`
+                  - Send: msg workerN "REVISE <id>: merge conflict — rebase
+                    onto main, resolve, and re-submit DONE. Read
+                    tasks/<id>.md ## Review for details."
+                  - Append the conflict details to the task spec under
+                    `## Review`.
 6. ADVANCE      Update BOARD.md. Promote QUEUED tasks whose deps are now met.
                 Decide what idle workers do (see section 7).
 7. REPEAT       Until the stop condition (section 8) is met.
@@ -152,6 +190,24 @@ Do not add new dependencies without asking.
 
 Keep the loop tight: a worker sitting on a `DONE` waiting for your review, or on
 an unanswered `ASK`, is wasted time. Prioritize unblocking over planning ahead.
+
+### Worker health check
+
+Workers may crash, hit rate limits, or get stuck. If a worker hasn't sent any
+message in ~10 minutes, check whether it's still alive:
+
+```
+tmux capture-pane -t <workerN> -p | tail -20
+```
+
+If the output shows an error, a crash, or the session is gone:
+- Mark the worker's `ACTIVE` task as `BLOCKED` with note "worker unresponsive".
+- Tell the human: "`workerN` appears dead — check its tmux session."
+- Reassign the task to another worker if one is available.
+
+A silent worker that is still responsive (e.g., mid-turn on a long task) is
+fine — don't interrupt it. This check is for distinguishing a dead session
+from a busy one.
 
 ---
 
@@ -186,6 +242,19 @@ holds:
 If you get stuck (a task keeps failing review, a design question is above your
 pay grade, or the goal is ambiguous), **stop and ask the human** rather than
 spinning the workers.
+
+### REVISE circuit breaker
+
+If a task goes through **3 REVISE cycles** without passing review, stop the
+loop — further rounds are unlikely to help:
+
+- Mark the task `BLOCKED` with note "failing review after 3 rounds".
+- Tell the human: "`<id>` has failed review 3 times — here's what's wrong:
+  `<summary>`. How should we proceed?"
+- Do NOT send a 4th `REVISE` without explicit human direction.
+
+Track the REVISE count in the task's `notes` field in `BOARD.md` (e.g.,
+"revises: 2"). Increment it each time you send a `REVISE` for that task.
 
 ---
 

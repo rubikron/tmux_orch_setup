@@ -84,6 +84,11 @@ fix, re-commit, and `DONE` again.
 
 ## 5. What NOT to do
 
+- Don't access another worker's worktree or branch. Your worktree is at
+  `../<repo>-worktrees/workerN`. Other workers have their own. While there's
+  no technical sandbox preventing you from `cd`ing into another worktree,
+  doing so violates the isolation contract this fleet depends on. The
+  orchestrator trusts you to stay in your directory.
 - Don't expand scope. Extra "improvements" outside the task cause merge conflicts
   and review churn.
 - Don't touch `main` or another worker's branch.

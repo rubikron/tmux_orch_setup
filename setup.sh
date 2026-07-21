@@ -83,7 +83,7 @@ start_session () {
   tmux new-session -d -s "$name" -c "$dir"
   tmux send-keys -t "$name" "export FLEET_DIR='$FLEET_DIR'" Enter
   tmux send-keys -t "$name" "export PATH='$FLEET_DIR/bin':\"\$PATH\"" Enter
-  for kv in "${extra_env[@]}"; do
+  for kv in "${extra_env[@]:-}"; do
     tmux send-keys -t "$name" "export $kv" Enter
   done
   # Orchestrator must always use Opus, never DeepSeek. If the calling shell

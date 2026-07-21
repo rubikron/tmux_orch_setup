@@ -74,6 +74,13 @@ start_session () {
   for kv in "${extra_env[@]}"; do
     tmux send-keys -t "$name" "export $kv" Enter
   done
+  # Orchestrator must always use Opus, never DeepSeek. If the calling shell
+  # has ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL set (e.g.
+  # from a prior DeepSeek session), unset them so claude uses default auth.
+  if [[ "$name" == "orchestrator" ]]; then
+    tmux send-keys -t "$name" \
+      "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL" Enter
+  fi
   tmux send-keys -t "$name" \
     "claude --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
 }

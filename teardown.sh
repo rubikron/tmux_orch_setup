@@ -16,7 +16,7 @@ for i in 1 2 3; do
     if git -C "$REPO" worktree remove "$wt"; then
       echo "removed worktree $wt"
     else
-      echo "warning: worktree $wt has uncommitted changes — commit/stash inside it, or re-run with 'git worktree remove --force $wt' if you're sure" >&2
+      echo "warning: worktree $wt could not be removed — it may have uncommitted changes or its branch may be active elsewhere. Commit/stash inside it, or re-run with 'git worktree remove --force $wt' if you're sure." >&2
     fi
   fi
 done

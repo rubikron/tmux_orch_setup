@@ -61,6 +61,11 @@ work), `FYI` (heads-up).
 ## 4. Your work loop
 
 ```
+0. SYNC      Before implementing, rebase your branch onto `main`:
+             `git fetch origin && git rebase origin/main`. If the rebase
+             has conflicts you can't trivially resolve, ASK the
+             orchestrator — don't force it. Do this before every new task,
+             not just when you know you depend on another worker's changes.
 1. RECEIVE   A `TASK` arrives pointing to a spec. Read $FLEET_DIR/tasks/<id>.md
              fully.
 2. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.

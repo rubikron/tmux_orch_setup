@@ -25,12 +25,26 @@ if [[ "$line" == *$'\n'* ]]; then
   exit 1
 fi
 
-# Control plane: inject the message as a user turn in the target session.
-# -l (literal) stops tmux from interpreting characters as key names.
-tmux send-keys -t "$target" -l "$line"
-tmux send-keys -t "$target" Enter
-
-# Audit plane: one atomic append so the orchestrator (and you) can see all traffic.
+# Shared coordination directory — used by both control and audit planes.
 coord="${FLEET_DIR:-.}"
 mkdir -p "$coord"
+
+# Control plane: inject the message as a user turn in the target session.
+# -l (literal) stops tmux from interpreting characters as key names.
+# Wrap in flock so concurrent senders to the same target don't mangle each
+# other's lines — the send is two tmux commands and must be atomic.
+lockfile="$coord/.lock.$target"
+exec {lock_fd}>"$lockfile" 2>/dev/null || true
+
+if [[ -n "${lock_fd:-}" ]] && flock -w 2 "$lock_fd" 2>/dev/null; then
+  tmux send-keys -t "$target" -l "$line"
+  tmux send-keys -t "$target" Enter
+  flock -u "$lock_fd" 2>/dev/null || true
+else
+  # Graceful degradation: if flock isn't available, send without locking
+  tmux send-keys -t "$target" -l "$line"
+  tmux send-keys -t "$target" Enter
+fi
+
+# Audit plane: one atomic append so the orchestrator (and you) can see all traffic.
 printf '%s %s\n' "$(date '+%H:%M:%S')" "$line" >> "$coord/comms.log"

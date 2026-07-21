@@ -243,6 +243,19 @@ If you get stuck (a task keeps failing review, a design question is above your
 pay grade, or the goal is ambiguous), **stop and ask the human** rather than
 spinning the workers.
 
+### REVISE circuit breaker
+
+If a task goes through **3 REVISE cycles** without passing review, stop the
+loop — further rounds are unlikely to help:
+
+- Mark the task `BLOCKED` with note "failing review after 3 rounds".
+- Tell the human: "`<id>` has failed review 3 times — here's what's wrong:
+  `<summary>`. How should we proceed?"
+- Do NOT send a 4th `REVISE` without explicit human direction.
+
+Track the REVISE count in the task's `notes` field in `BOARD.md` (e.g.,
+"revises: 2"). Increment it each time you send a `REVISE` for that task.
+
 ---
 
 ## 9. First move

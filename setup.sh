@@ -2,7 +2,10 @@
 # setup.sh — spin up a 1 Opus orchestrator + 3 DeepSeek worker Claude Code fleet.
 #
 # Usage:
-#   DEEPSEEK_API_KEY=sk-... ./setup.sh /path/to/your/project/repo
+#   ./setup.sh /path/to/your/project/repo
+#
+#   Set DEEPSEEK_API_KEY via shell env, .env file, or .env.local.
+#   A .env.example is provided — copy to .env.local and fill in your key.
 #
 # What it does:
 #   1. Creates a coordination dir ($FLEET_DIR) with BOARD.md, tasks/, comms.log, bin/msg
@@ -16,15 +19,23 @@ set -euo pipefail
 
 # ---- config (override via env) --------------------------------------------
 REPO="${1:-$(pwd)}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # this fleet kit's dir
+
+# Source .env files (lowest priority — explicit shell exports override).
+# .env.local overrides .env; fleet-kit dir overrides cwd.
+for env_file in "$PWD/.env" "$PWD/.env.local" "$HERE/.env" "$HERE/.env.local"; do
+  # shellcheck disable=SC1090
+  [[ -f "$env_file" ]] && source "$env_file"
+done
+
 WORKER_MODEL="${WORKER_MODEL:-deepseek-v4-pro}"       # set to DeepSeek's current coding model
 DEEPSEEK_BASE="${DEEPSEEK_BASE:-https://api.deepseek.com/anthropic}"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"  # this fleet kit's dir
 # ---------------------------------------------------------------------------
 
 command -v tmux  >/dev/null || { echo "tmux not found"; exit 1; }
 command -v claude >/dev/null || { echo "claude (Claude Code) not found"; exit 1; }
 command -v git   >/dev/null || { echo "git not found"; exit 1; }
-: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in your environment}"
+: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in your environment or .env file}"
 
 REPO="$(cd "$REPO" && pwd)"
 git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
@@ -44,9 +55,9 @@ if [[ ! -f "$FLEET_DIR/BOARD.md" ]]; then
 # ------ -------- --------- -----------------------------
 EOF
 fi
-# keep coordination noise out of the project's own history
+# keep coordination noise and secrets out of the project's own history
 grep -qxF '.fleet/' "$REPO/.gitignore" 2>/dev/null || echo '.fleet/' >> "$REPO/.gitignore"
-
+grep -qxF '.env.local' "$REPO/.gitignore" 2>/dev/null || echo '.env.local' >> "$REPO/.gitignore"
 # ---- worktrees for workers -------------------------------------------------
 WT_ROOT="$REPO/../$(basename "$REPO")-worktrees"
 mkdir -p "$WT_ROOT"

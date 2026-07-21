@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# msg — send a one-line message to another agent's Claude Code session.
+#
+# Usage:  msg <target-session> <message...>
+# Example: msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
+#
+# It types the message into the target tmux session as if the user typed it,
+# then appends the same line to the shared comms.log so every exchange is
+# auditable (send-keys itself leaves no record).
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+  echo "usage: msg <target-session> <message...>" >&2
+  exit 1
+fi
+
+target="$1"; shift
+sender="$(tmux display-message -p '#S' 2>/dev/null || echo human)"
+line="[$sender -> $target] $*"
+
+# Control plane: inject the message as a user turn in the target session.
+# -l (literal) stops tmux from interpreting characters as key names.
+tmux send-keys -t "$target" -l "$line"
+tmux send-keys -t "$target" Enter
+
+# Audit plane: one atomic append so the orchestrator (and you) can see all traffic.
+coord="${FLEET_DIR:-.}"
+mkdir -p "$coord"
+printf '%s %s\n' "$(date '+%H:%M:%S')" "$line" >> "$coord/comms.log"

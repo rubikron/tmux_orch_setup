@@ -191,6 +191,24 @@ Do not add new dependencies without asking.
 Keep the loop tight: a worker sitting on a `DONE` waiting for your review, or on
 an unanswered `ASK`, is wasted time. Prioritize unblocking over planning ahead.
 
+### Worker health check
+
+Workers may crash, hit rate limits, or get stuck. If a worker hasn't sent any
+message in ~10 minutes, check whether it's still alive:
+
+```
+tmux capture-pane -t <workerN> -p | tail -20
+```
+
+If the output shows an error, a crash, or the session is gone:
+- Mark the worker's `ACTIVE` task as `BLOCKED` with note "worker unresponsive".
+- Tell the human: "`workerN` appears dead — check its tmux session."
+- Reassign the task to another worker if one is available.
+
+A silent worker that is still responsive (e.g., mid-turn on a long task) is
+fine — don't interrupt it. This check is for distinguishing a dead session
+from a busy one.
+
 ---
 
 ## 7. Idle-worker decision point

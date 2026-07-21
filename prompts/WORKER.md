@@ -61,6 +61,11 @@ work), `FYI` (heads-up).
 ## 4. Your work loop
 
 ```
+0. SYNC      Before implementing, rebase your branch onto `main`:
+             `git fetch origin && git rebase origin/main`. If the rebase
+             has conflicts you can't trivially resolve, ASK the
+             orchestrator — don't force it. Do this before every new task,
+             not just when you know you depend on another worker's changes.
 1. RECEIVE   A `TASK` arrives pointing to a spec. Read $FLEET_DIR/tasks/<id>.md
              fully.
 2. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
@@ -79,6 +84,11 @@ fix, re-commit, and `DONE` again.
 
 ## 5. What NOT to do
 
+- Don't access another worker's worktree or branch. Your worktree is at
+  `../<repo>-worktrees/workerN`. Other workers have their own. While there's
+  no technical sandbox preventing you from `cd`ing into another worktree,
+  doing so violates the isolation contract this fleet depends on. The
+  orchestrator trusts you to stay in your directory.
 - Don't expand scope. Extra "improvements" outside the task cause merge conflicts
   and review churn.
 - Don't touch `main` or another worker's branch.

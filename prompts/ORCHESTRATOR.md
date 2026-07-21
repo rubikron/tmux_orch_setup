@@ -161,7 +161,15 @@ Do not add new dependencies without asking.
                 Update BOARD.md: <id> -> ACTIVE, assignee, branch, files.
 4. SUPPORT      Answer ASKs fast (msg workerN "ANS <id>: ..."). Unblock
                 BLOCKED workers. Scan comms.log for peer threads needing you.
-5. REVIEW       On DONE, read `git diff main..w<n>`. Then either:
+5. REVIEW       On DONE, read `git diff main..w<n>`.
+                Before merging, verify the branch passes tests independently:
+                  git checkout w<n>
+                  <run the project's test/build command>
+                  git checkout main
+                If you don't know the test command, ask the human on first use
+                or detect it from package.json / Makefile / Cargo.toml / etc.
+                If tests fail, REVISE instead of merging (see below).
+                Then either:
                   - merge: `git merge --no-ff w<n>` (or cherry-pick), mark MERGED
                   - or: msg workerN "REVISE <id>: read tasks/<id>.md ## Review"
                     (append what to fix to the spec file first)

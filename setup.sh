@@ -105,7 +105,8 @@ for i in 1 2 3; do
   start_session "worker$i" "$WT_ROOT/worker$i" "$HERE/prompts/WORKER.md" \
     "ANTHROPIC_BASE_URL=$DEEPSEEK_BASE" \
     "ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY" \
-    "ANTHROPIC_MODEL=$WORKER_MODEL"
+    "ANTHROPIC_MODEL=$WORKER_MODEL" \
+    "CLAUDE_CODE_EFFORT_LEVEL=max"
 done
 
 cat <<EOF

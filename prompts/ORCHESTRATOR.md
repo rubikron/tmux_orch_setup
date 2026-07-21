@@ -154,8 +154,11 @@ Do not add new dependencies without asking.
                 architecture sketch and an ordered task breakdown.
 2. RECORD       Write/refresh BOARD.md with every task, its state, deps.
 3. ASSIGN       Pick the next ready task(s) per the decision tree.
+                If the task depends on work that was merged since the
+                worker's branch was last synced, sync first:
+                  `git -C <worker-worktree-path> merge main` (or rebase).
                 Write tasks/<id>.md, then: msg workerN "TASK <id>: read <path>"
-                Update BOARD.md: <id> -> ACTIVE, assignee, branch.
+                Update BOARD.md: <id> -> ACTIVE, assignee, branch, files.
 4. SUPPORT      Answer ASKs fast (msg workerN "ANS <id>: ..."). Unblock
                 BLOCKED workers. Scan comms.log for peer threads needing you.
 5. REVIEW       On DONE, read `git diff main..w<n>`. Then either:

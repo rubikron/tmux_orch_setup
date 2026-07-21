@@ -35,7 +35,8 @@ FLEET_DIR="$REPO/.fleet"
 mkdir -p "$FLEET_DIR/tasks" "$FLEET_DIR/bin"
 cp "$HERE/bin/msg" "$FLEET_DIR/bin/msg"
 chmod +x "$FLEET_DIR/bin/msg"
-: > "$FLEET_DIR/comms.log"
+# Persist comms.log across runs (matching BOARD.md behavior) for audit trail.
+touch "$FLEET_DIR/comms.log"
 if [[ ! -f "$FLEET_DIR/BOARD.md" ]]; then
   cat > "$FLEET_DIR/BOARD.md" <<'EOF'
 # Task Board  (owned by the orchestrator)

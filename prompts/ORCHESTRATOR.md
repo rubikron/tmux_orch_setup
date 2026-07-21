@@ -33,6 +33,20 @@ It contains:
 - `tasks/<id>.md` — one file per task spec (you write these).
 - `comms.log` — an append-only log of every message. Read it to see peer chatter.
 
+**BOARD.md format** — you maintain this table. Add one row per task:
+
+```
+# id     state    assignee  files                    notes
+# ------ -------- --------- ------------------------ -----------------------------
+```
+
+- `id` — task identifier (`t-001`, `t-002`, …).
+- `state` — `QUEUED`, `ACTIVE`, `BLOCKED`, or `MERGED`.
+- `assignee` — `worker1`, `worker2`, `worker3`, or empty while queued.
+- `files` — comma-separated list of files this task touches. Used to detect
+  same-file contention before assigning (see section 4 item 4).
+- `notes` — dependencies, REVISE count, issue references, or free-form context.
+
 **Sending a message** — use the `msg` command from your shell:
 ```
 msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
@@ -85,6 +99,9 @@ Your default is **one worker.** Fan out only when it clearly pays off.
 
 4. **Same-file contention** — two candidate steps edit the same file:
    → **serialize** them onto one worker rather than causing a merge fight.
+   Before assigning, check `BOARD.md`'s `files` column — if any `ACTIVE` task
+   already claims a file you're about to assign, serialize onto that same
+   worker (or wait for the active task to merge).
 
 Heuristic: *fan out only when the parallel parts are genuinely independent AND
 each is worth ~5+ minutes of work.* Below that bar, coordination overhead makes

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh — spin up a 1 Opus orchestrator + 3 DeepSeek worker Claude Code fleet.
+# setup.sh — spin up a 1 Opus orchestrator + 3 DeepSeek workers + 1 Sonnet UI tester fleet.
 #
 # Usage:
 #   ./setup.sh /path/to/your/project/repo
@@ -9,10 +9,11 @@
 #
 # What it does:
 #   1. Creates a coordination dir ($FLEET_DIR) with BOARD.md, tasks/, comms.log, bin/msg
-#   2. Creates 3 git worktrees (branches w1/w2/w3) for the workers
-#   3. Starts 4 tmux sessions and launches Claude Code in each
+#   2. Creates 4 git worktrees (branches w1/w2/w3/w4) for the workers
+#   3. Starts 5 tmux sessions and launches Claude Code in each
 #        - orchestrator: Opus (your normal Claude Code auth), on `main`
 #        - worker1/2/3 : DeepSeek via the Anthropic-compatible endpoint
+#        - worker4      : Sonnet (your normal Claude Code auth), UI testing specialist
 #
 # Attach to any session in its own terminal window with:  tmux attach -t worker1
 set -euo pipefail
@@ -62,7 +63,7 @@ grep -qxF '.env.local' "$REPO/.gitignore" 2>/dev/null || echo '.env.local' >> "$
 WT_ROOT="$REPO/../$(basename "$REPO")-worktrees"
 mkdir -p "$WT_ROOT"
 DEFAULT_BRANCH="$(git -C "$REPO" symbolic-ref --short HEAD)"
-for i in 1 2 3; do
+for i in 1 2 3 4; do
   wt="$WT_ROOT/worker$i"
   if [[ -d "$wt" ]]; then
     continue                                   # worktree already present
@@ -86,10 +87,9 @@ start_session () {
   for kv in "${extra_env[@]:-}"; do
     tmux send-keys -t "$name" "export $kv" Enter
   done
-  # Orchestrator must always use Opus, never DeepSeek. If the calling shell
-  # has ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL set (e.g.
-  # from a prior DeepSeek session), unset them so claude uses default auth.
-  if [[ "$name" == "orchestrator" ]]; then
+  # Orchestrator and UI tester must use real Anthropic auth, never DeepSeek.
+  # If the calling shell has DeepSeek vars set (from a prior session), unset them.
+  if [[ "$name" == "orchestrator" || "$name" == "worker4" ]]; then
     tmux send-keys -t "$name" \
       "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL" Enter
   fi
@@ -100,7 +100,7 @@ start_session () {
 # Orchestrator: your normal Claude Code auth (Opus). No DeepSeek env.
 start_session orchestrator "$REPO" "$HERE/prompts/ORCHESTRATOR.md"
 
-# Workers: DeepSeek via the Anthropic-compatible endpoint.
+# Workers 1-3: DeepSeek via the Anthropic-compatible endpoint.
 for i in 1 2 3; do
   start_session "worker$i" "$WT_ROOT/worker$i" "$HERE/prompts/WORKER.md" \
     "ANTHROPIC_BASE_URL=$DEEPSEEK_BASE" \
@@ -109,18 +109,27 @@ for i in 1 2 3; do
     "CLAUDE_CODE_EFFORT_LEVEL=max"
 done
 
+# Worker 4: Sonnet UI tester — uses real Anthropic auth, not DeepSeek.
+# Set ANTHROPIC_MODEL to the current Sonnet model name.
+UI_TESTER_MODEL="${UI_TESTER_MODEL:-claude-sonnet-5}"
+start_session "worker4" "$WT_ROOT/worker4" "$HERE/prompts/UI_TESTER.md" \
+  "ANTHROPIC_MODEL=$UI_TESTER_MODEL" \
+  "CLAUDE_CODE_EFFORT_LEVEL=max"
+
 cat <<EOF
 
 Fleet is up.
   coordination dir : $FLEET_DIR
-  worktrees        : $WT_ROOT/worker{1,2,3}   (branches w1/w2/w3)
-  workers on model : $WORKER_MODEL
+  worktrees        : $WT_ROOT/worker{1,2,3,4}   (branches w1/w2/w3/w4)
+  workers 1-3 on   : $WORKER_MODEL
+  worker4 on       : $UI_TESTER_MODEL  (UI testing specialist)
 
-Open four terminal windows and attach one session in each:
+Open five terminal windows and attach one session in each:
   tmux attach -t orchestrator
   tmux attach -t worker1
   tmux attach -t worker2
   tmux attach -t worker3
+  tmux attach -t worker4
 
 Then paste your project goal into the orchestrator (see README kickoff prompt).
 Tear down later with:  ./teardown.sh $REPO

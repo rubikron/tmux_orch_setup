@@ -26,6 +26,7 @@ coordination files: `BOARD.md`, `tasks/*.md`, and (for review) reading diffs.
 | `worker1` | DeepSeek | worktree on branch `w1` | implement assigned steps |
 | `worker2` | DeepSeek | worktree on branch `w2` | implement assigned steps |
 | `worker3` | DeepSeek | worktree on branch `w3` | implement assigned steps |
+| `worker4` | Sonnet | worktree on branch `w4` | UI testing: screenshots, visual critique, a11y |
 
 **Coordination directory:** `$FLEET_DIR` (an absolute path in your env).
 It contains:
@@ -42,7 +43,7 @@ It contains:
 
 - `id` — task identifier (`t-001`, `t-002`, …).
 - `state` — `QUEUED`, `ACTIVE`, `BLOCKED`, or `MERGED`.
-- `assignee` — `worker1`, `worker2`, `worker3`, or empty while queued.
+- `assignee` — `worker1`, `worker2`, `worker3`, `worker4`, or empty while queued.
 - `files` — comma-separated list of files this task touches. Used to detect
   same-file contention before assigning (see section 4 item 4).
 - `notes` — dependencies, REVISE count, issue references, or free-form context.
@@ -102,6 +103,18 @@ Your default is **one worker.** Fan out only when it clearly pays off.
    Before assigning, check `BOARD.md`'s `files` column — if any `ACTIVE` task
    already claims a file you're about to assign, serialize onto that same
    worker (or wait for the active task to merge).
+
+5. **UI inspection needed** — the work involves pages, screens, layouts,
+   accessibility, or visual polish:
+   → **assign to `worker4`** (Sonnet, UI testing specialist). Worker4 has
+   browser automation tools (Playwright / Claude-in-Chrome MCP) and can
+   take screenshots, test responsiveness, check accessibility, and produce
+   structured visual critique. Worker4 does NOT write code — its output is
+   a review report committed to `w4`. Use it when:
+   - A page or component has been built and needs visual verification.
+   - You want before/after screenshots of a UI change.
+   - Accessibility or responsive behavior needs checking.
+   - The human asks "how does this look?" — that's worker4's job.
 
 Heuristic: *fan out only when the parallel parts are genuinely independent AND
 each is worth ~5+ minutes of work.* Below that bar, coordination overhead makes
@@ -223,9 +236,14 @@ it), decide per-project what idle workers do. Pick one:
 - **Tests** — assign an idle worker to write tests for already-merged work.
 - **Prep** — have an idle worker read the part of the codebase the next task
   will touch and report anything surprising.
+- **UI audit** — have `worker4` run an accessibility or visual regression pass
+  on the current state of the UI. Particularly useful after a batch of merges
+  that touched frontend code.
 
 Default to **standby** unless the active work is substantial enough that a second
-set of eyes clearly pays for itself.
+set of eyes clearly pays for itself. Worker4 (UI tester) is an exception: if the
+project has a UI, running a visual check after significant frontend merges is
+cheap and catches regressions early.
 
 ---
 

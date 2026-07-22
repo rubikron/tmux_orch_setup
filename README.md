@@ -96,7 +96,8 @@ fleet/
 ├── bin/
 │   ├── msg               one-line inter-agent messenger (send-keys + comms.log)
 │   ├── status            live fleet dashboard (sessions, tasks, traffic)
-│   └── learn             post-run analysis (metrics → learnings.md)
+│   ├── learn             post-run analysis (metrics → learnings.md)
+│   └── fleet-path-hook   PreToolUse hook: keeps msg/status/learn on the Bash-tool PATH
 ├── prompts/
 │   ├── ORCHESTRATOR.md   Opus tech-lead operating manual
 │   ├── WORKER.md         DeepSeek implementer operating manual
@@ -130,4 +131,15 @@ When you edit a prompt, bump the version so `bin/learn` can correlate changes wi
   the whole team's traffic at a glance.
 - **Busy workers queue input.** A message sent to a worker mid-task lands in its
   input queue and is picked up when it finishes the current turn.
+
+## Troubleshooting
+
+- **`msg: command not found` / `exit 127` inside an agent.** Claude Code's Bash
+  tool re-sources a per-session shell snapshot that rebuilds `PATH` from your rc
+  files, dropping the `$FLEET_DIR/bin` that `setup.sh` prepends — so bare
+  `msg`/`status`/`learn` can vanish. `setup.sh` fixes this by registering the
+  `bin/fleet-path-hook` PreToolUse hook (via `claude --settings`), which re-adds
+  `$FLEET_DIR/bin` to `PATH` for fleet-tool commands. If you launch `claude`
+  by hand instead of through `setup.sh`, pass
+  `--settings "$FLEET_DIR/fleet-settings.json"` so the hook is loaded.
 ```

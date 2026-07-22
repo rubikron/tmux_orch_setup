@@ -48,7 +48,31 @@ mkdir -p "$FLEET_DIR/tasks" "$FLEET_DIR/bin"
 cp "$HERE/bin/msg" "$FLEET_DIR/bin/msg"
 cp "$HERE/bin/status" "$FLEET_DIR/bin/status"
 cp "$HERE/bin/learn" "$FLEET_DIR/bin/learn"
-chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn"
+cp "$HERE/bin/fleet-path-hook" "$FLEET_DIR/bin/fleet-path-hook"
+chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn" \
+         "$FLEET_DIR/bin/fleet-path-hook"
+
+# Claude Code's Bash tool re-sources a shell snapshot that rebuilds PATH from
+# your rc files, dropping the $FLEET_DIR/bin we prepend below. That makes bare
+# `msg`/`status`/`learn` fail with exit 127. We register a PreToolUse hook that
+# re-adds $FLEET_DIR/bin to PATH for fleet-tool commands, and hand it to every
+# session via `claude --settings`. --settings merges additively, so it leaves
+# the user's own settings/hooks untouched. See bin/fleet-path-hook.
+FLEET_SETTINGS="$FLEET_DIR/fleet-settings.json"
+cat > "$FLEET_SETTINGS" <<EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "$FLEET_DIR/bin/fleet-path-hook" }
+        ]
+      }
+    ]
+  }
+}
+EOF
 # Persist comms.log and metrics.jsonl across runs for audit trail.
 touch "$FLEET_DIR/comms.log"
 if [[ ! -f "$FLEET_DIR/metrics.jsonl" ]]; then
@@ -102,7 +126,7 @@ start_session () {
     tmux send-keys -t "$name" "export $kv" Enter
   done
   tmux send-keys -t "$name" \
-    "claude --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
+    "claude --settings '$FLEET_SETTINGS' --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
 }
 
 # Orchestrator: Opus via real Anthropic auth. No DeepSeek env.

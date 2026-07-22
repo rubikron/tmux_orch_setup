@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# fleet-path-hook — Claude Code PreToolUse(Bash) hook that keeps the fleet's
+# bin tools (msg, status, learn) resolvable from inside the Bash tool.
+#
+# Why this exists
+# ---------------
+# setup.sh prepends $FLEET_DIR/bin to PATH in each tmux shell before launching
+# claude, and that PATH is even inherited by the claude process itself. But
+# Claude Code's Bash tool does NOT run commands with that live PATH: before
+# every command it sources a per-session shell snapshot whose trailing
+# `export PATH=...` rebuilds PATH from your rc files — and that rebuilt PATH
+# does not contain $FLEET_DIR/bin. The result is that a bare `msg`/`status`/
+# `learn` intermittently fails with exit 127 (command not found), depending on
+# which snapshot the session captured.
+#
+# This hook rewrites any Bash command that invokes a fleet tool so it prepends
+# $FLEET_DIR/bin to PATH at execution time. That makes the bare-command
+# ergonomics the prompts rely on ("just run `msg worker1 ...`") work reliably,
+# without embedding absolute paths in the prompts or the messages themselves.
+#
+# Safety: this hook FAILS OPEN. Any problem (no jq, unparseable input, not a
+# fleet session, command doesn't touch a fleet tool) exits 0 with no output,
+# leaving the command untouched. It never blocks a Bash command.
+
+# No `set -e`/`set -u`: a non-zero exit or unbound-var abort could block the
+# tool. Guard everything explicitly and exit 0 on any doubt.
+
+# Only act inside a fleet session.
+[ -n "${FLEET_DIR:-}" ] || exit 0
+
+# Need jq to read/emit JSON safely; degrade to no-op if it's missing.
+command -v jq >/dev/null 2>&1 || exit 0
+
+input="$(cat 2>/dev/null)" || exit 0
+[ -n "$input" ] || exit 0
+
+cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)" || exit 0
+[ -n "$cmd" ] || exit 0
+
+# Only rewrite when a fleet tool is invoked in COMMAND POSITION: at the start
+# of a line (grep's ^ matches after every newline) or right after a
+# ;/&/|/( separator. This deliberately does NOT match a tool name used as an
+# argument to something else — e.g. `git status`, `echo learn`, or an already
+# qualified `$FLEET_DIR/bin/msg` — so unrelated commands are left untouched.
+printf '%s' "$cmd" \
+  | grep -Eq '(^|[;&|(])[[:space:]]*(msg|status|learn)([[:space:]]|$)' \
+  || exit 0
+
+# Prepend the fleet bin dir to PATH for this command. FLEET_DIR is expanded now
+# (absolute path), while $PATH stays literal so it resolves at run time.
+newcmd="export PATH=\"$FLEET_DIR/bin:\$PATH\"; $cmd"
+
+jq -n --arg c "$newcmd" '{
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    updatedInput: { command: $c }
+  }
+}' 2>/dev/null || exit 0

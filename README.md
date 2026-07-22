@@ -23,7 +23,7 @@ shared coordination directory. Reusable for any git project.
 ## How it works
 
 - **Two planes.** Control plane = tmux `send-keys` (short one-line signals via the
-  `msg` command). Data plane = files: task specs in `$FLEET_DIR/tasks/`, results
+  `fleet-msg` command). Data plane = files: task specs in `$FLEET_DIR/tasks/`, results
   as git branches, state in `$FLEET_DIR/BOARD.md`, an audit trail in
   `$FLEET_DIR/comms.log`.
 - **Isolation via git worktrees.** Each worker has its own working tree on its own
@@ -80,7 +80,7 @@ Follow your operating manual:
   before assigning anything.
 - Then run your loop. Default to a single worker for small/simple work; fan
   out only for genuinely independent, non-trivial parallel parts.
-- Assign via task spec files + one-line `msg` pointers. Review every branch
+- Assign via task spec files + one-line `fleet-msg` pointers. Review every branch
   before merging. Keep BOARD.md current.
 - Stop and ask me if the goal is ambiguous or a task keeps failing review.
 
@@ -94,9 +94,9 @@ fleet/
 ├── setup.sh              spin up worktrees + tmux + 5 Claude Code sessions
 ├── teardown.sh           kill sessions, remove worker worktrees
 ├── bin/
-│   ├── msg               one-line inter-agent messenger (send-keys + comms.log)
-│   ├── status            live fleet dashboard (sessions, tasks, traffic)
-│   └── learn             post-run analysis (metrics → learnings.md)
+│   ├── msg               one-line inter-agent messenger — installed as `fleet-msg`
+│   ├── status            live fleet dashboard — installed as `fleet-status`
+│   └── learn             post-run analysis — installed as `fleet-learn`
 ├── prompts/
 │   ├── ORCHESTRATOR.md   Opus tech-lead operating manual
 │   ├── WORKER.md         DeepSeek implementer operating manual
@@ -110,16 +110,16 @@ The fleet records structured metrics and supports live monitoring:
 
 | Command | Description |
 |---------|-------------|
-| `bin/status` | Live dashboard: session health, task board, recent traffic, worker stats |
-| `bin/learn` | Post-run analysis: REVISE rates, worker utilization, task-size patterns, suggestions |
+| `fleet-status` | Live dashboard: session health, task board, recent traffic, worker stats |
+| `fleet-learn` | Post-run analysis: REVISE rates, worker utilization, task-size patterns, suggestions |
 
 **Metrics:** The orchestrator appends one JSON line per task to `.fleet/metrics.jsonl`.
-After teardown, run `bin/learn` to analyze the run and append findings to
+After teardown, run `fleet-learn` to analyze the run and append findings to
 `.fleet/learnings.md`. The orchestrator reads prior learnings on startup and
 incorporates them into its planning.
 
 **Prompt versions:** Each prompt file carries a version header (`<!-- version: X.Y.Z -->`).
-When you edit a prompt, bump the version so `bin/learn` can correlate changes with outcomes.
+When you edit a prompt, bump the version so `fleet-learn` can correlate changes with outcomes.
 
 ## Tuning notes
 

@@ -23,7 +23,7 @@ if [[ -z "$FLEET_DIR" ]]; then
 fi
 
 if [[ -z "$FLEET_DIR" || ! -d "$FLEET_DIR" ]]; then
-  echo "status: no .fleet/ coordination dir found — is the fleet running?" >&2
+  echo "$(basename "$0"): no .fleet/ coordination dir found — is the fleet running?" >&2
   exit 1
 fi
 

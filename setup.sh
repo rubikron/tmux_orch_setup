@@ -49,6 +49,27 @@ cp "$HERE/bin/msg" "$FLEET_DIR/bin/msg"
 cp "$HERE/bin/status" "$FLEET_DIR/bin/status"
 cp "$HERE/bin/learn" "$FLEET_DIR/bin/learn"
 chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn"
+
+# ---- global CLI install ----------------------------------------------------
+# Why: the tmux panes add $FLEET_DIR/bin to PATH, so the tools resolve when a
+# human types them. But Claude Code's Bash tool (used by the orchestrator)
+# sources a shell snapshot that REBUILDS PATH from your rc files before every
+# command, dropping $FLEET_DIR/bin — so bare tools there fail with exit 127
+# ("command not found"). Fix: symlink the tools into ~/.local/bin, which is
+# already on that snapshot PATH, under repo-specific names so they can't shadow
+# generic commands. The scripts read $FLEET_DIR from the env at runtime, so a
+# single install serves whichever fleet is running. teardown.sh removes them.
+LOCAL_BIN="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN"
+ln -sf "$HERE/bin/msg"    "$LOCAL_BIN/fleet-msg"
+ln -sf "$HERE/bin/status" "$LOCAL_BIN/fleet-status"
+ln -sf "$HERE/bin/learn"  "$LOCAL_BIN/fleet-learn"
+case ":$PATH:" in
+  *":$LOCAL_BIN:"*) : ;;  # already on PATH — good
+  *) echo "warning: $LOCAL_BIN is not on your PATH. Add it (e.g. in ~/.zshrc:" \
+          "export PATH=\"\$HOME/.local/bin:\$PATH\") or fleet-msg/status/learn" \
+          "won't resolve." >&2 ;;
+esac
 # Persist comms.log and metrics.jsonl across runs for audit trail.
 touch "$FLEET_DIR/comms.log"
 if [[ ! -f "$FLEET_DIR/metrics.jsonl" ]]; then
@@ -133,6 +154,7 @@ Fleet is up.
   worktrees        : $WT_ROOT/worker{1,2,3,4}   (branches w1/w2/w3/w4)
   workers 1-3 on   : $WORKER_MODEL
   worker4 on       : $UI_TESTER_MODEL  (UI testing specialist)
+  fleet commands   : fleet-msg / fleet-status / fleet-learn  (symlinked into $LOCAL_BIN)
 
 Open five terminal windows and attach one session in each:
   tmux attach -t orchestrator

@@ -21,4 +21,13 @@ for i in 1 2 3 4; do
   fi
 done
 
+# Remove the global CLI symlinks setup.sh installed into ~/.local/bin.
+# Only unlink real symlinks (never a file someone else put there); the fleet's
+# session names are fixed, so one fleet runs per machine and this is safe.
+LOCAL_BIN="$HOME/.local/bin"
+for t in fleet-msg fleet-status fleet-learn; do
+  f="$LOCAL_BIN/$t"
+  [[ -L "$f" ]] && rm -f "$f" && echo "removed CLI symlink $f" || true
+done
+
 echo "Done. Worker branches w1/w2/w3/w4 kept. Coordination dir left at $REPO/.fleet"

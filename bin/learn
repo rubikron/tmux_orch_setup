@@ -27,7 +27,7 @@ if [[ -z "$FLEET_DIR" ]]; then
 fi
 
 if [[ -z "$FLEET_DIR" || ! -d "$FLEET_DIR" ]]; then
-  echo "learn: no .fleet/ coordination dir found" >&2
+  echo "$(basename "$0"): no .fleet/ coordination dir found" >&2
   exit 1
 fi
 
@@ -59,7 +59,7 @@ ttype_revised()    { grep "\"type\":\"$1\"" "$metrics" 2>/dev/null | grep -c '"r
 
 # ---- check we have data -----------------------------------------------------
 if [[ ! -f "$metrics" || ! -s "$metrics" ]]; then
-  echo "learn: no metrics.jsonl data yet — run the fleet first" >&2
+  echo "$(basename "$0"): no metrics.jsonl data yet — run the fleet first" >&2
   exit 0
 fi
 

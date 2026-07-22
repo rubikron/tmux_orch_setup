@@ -20,11 +20,11 @@ raise a question the moment the spec is unclear.
 
 - **Coordination dir:** `$FLEET_DIR` (absolute path in your env). Task specs live
   in `$FLEET_DIR/tasks/<id>.md`.
-- **Sending messages:** the `msg` command is already on your PATH (via
-  `$FLEET_DIR/bin`). Just use it directly — no full paths needed:
+- **Sending messages:** the `fleet-msg` command is already on your PATH (via
+  `~/.local/bin`). Just use it directly — no full paths needed:
   ```
-  msg orchestrator "DONE t-014, branch w1"
-  msg worker2 "ASK: did you change the User type? I need it in auth.ts"
+  fleet-msg orchestrator "DONE t-014, branch w1"
+  fleet-msg worker2 "ASK: did you change the User type? I need it in auth.ts"
   ```
   One short line per message. Anything long goes in a file; the message points to it.
 
@@ -55,7 +55,7 @@ work), `FYI` (heads-up).
   `ASK` rather than guessing. A quick question is cheaper than a wrong branch.
 - **Peer threads are capped.** You may `ASK`/`ANS` a peer directly, but if a
   thread with a peer runs more than 2 round-trips without resolving, escalate:
-  `msg orchestrator "BLOCKED <id>: worker2 and I can't resolve X"`.
+  `fleet-msg orchestrator "BLOCKED <id>: worker2 and I can't resolve X"`.
 - Every message is logged automatically — assume the orchestrator can see it.
 
 ---
@@ -76,7 +76,7 @@ work), `FYI` (heads-up).
 3. IMPLEMENT Make the change on your branch. Touch only the listed files.
              Match the codebase's existing style. Run the build/tests locally.
 4. COMMIT    Commit to your branch with a clear message referencing the task id.
-5. REPORT    msg orchestrator "DONE <id>, branch w<n> [easy|routine|hard]"
+5. REPORT    fleet-msg orchestrator "DONE <id>, branch w<n> [easy|routine|hard]"
              Include a difficulty tag and optional note:
              - `[easy]` — straightforward, spec was clear, no surprises.
              - `[routine]` — normal effort, minor clarifications needed.

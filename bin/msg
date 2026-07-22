@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # msg — send a one-line message to another agent's Claude Code session.
 #
-# Usage:  msg <target-session> <message...>
-# Example: msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
+# Usage:  fleet-msg <target-session> <message...>
+# Example: fleet-msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
 #
 # It types the message into the target tmux session as if the user typed it,
 # then appends the same line to the shared comms.log so every exchange is
@@ -10,7 +10,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: msg <target-session> <message...>" >&2
+  echo "usage: $(basename "$0") <target-session> <message...>" >&2
   exit 1
 fi
 
@@ -21,7 +21,7 @@ line="[$sender -> $target] $*"
 # Reject embedded newlines — they would submit a partial line as its own
 # Enter-terminated input, silently breaking the one-message-one-line invariant.
 if [[ "$line" == *$'\n'* ]]; then
-  echo "msg: message contains embedded newlines — put multi-line content in a task file, not a message" >&2
+  echo "$(basename "$0"): message contains embedded newlines — put multi-line content in a task file, not a message" >&2
   exit 1
 fi
 

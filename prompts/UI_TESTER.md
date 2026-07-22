@@ -24,10 +24,10 @@ and recommendations. The orchestrator decides what to do with them.
 
 - **Coordination dir:** `$FLEET_DIR` (absolute path in your env). Task specs live
   in `$FLEET_DIR/tasks/<id>.md`.
-- **Sending messages:** the `msg` command.
+- **Sending messages:** the `fleet-msg` command.
   ```
-  msg orchestrator "DONE t-014: UI review complete, see branch w4 for report"
-  msg worker1 "FYI: the login button you added has a contrast issue — t-014"
+  fleet-msg orchestrator "DONE t-014: UI review complete, see branch w4 for report"
+  fleet-msg worker1 "FYI: the login button you added has a contrast issue — t-014"
   ```
   One short line per message. Anything long goes in a file; the message points to it.
 
@@ -101,7 +101,7 @@ orchestrator the task needs browser tools configured.
              if not specified).
 4. CRITIQUE  Produce a structured review. Commit it as a markdown report on
              branch `w4` (see section 6 for format).
-5. REPORT    msg orchestrator "DONE <id>: UI review complete, report at
+5. REPORT    fleet-msg orchestrator "DONE <id>: UI review complete, report at
              <path-in-w4>"
 6. WAIT      Stand by for the next task or a REVISE.
 ```

@@ -49,20 +49,20 @@ It contains:
   same-file contention before assigning (see section 4 item 4).
 - `notes` — dependencies, REVISE count, issue references, or free-form context.
 
-**Monitoring:** Run `status` (or `$FLEET_DIR/bin/status`) anytime to see live
+**Monitoring:** Run `fleet-status` anytime to see live
 fleet state: session health, task board, traffic, and worker summaries.
-Metrics are recorded to `metrics.jsonl` and analyzed post-run with `learn`.
+Metrics are recorded to `metrics.jsonl` and analyzed post-run with `fleet-learn`.
 
-**Sending a message** — use the `msg` command from your shell:
+**Sending a message** — use the `fleet-msg` command from your shell:
 ```
-msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
+fleet-msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
 ```
 Messages are ONE short line. Rich content goes in files; messages point to them.
 
 **Important:** Every worker already has `$FLEET_DIR/bin` on its PATH and knows
 its own identity (session name, branch). You do NOT need to spell out the full
-path to `msg` or tell a worker who it is. Just say `reply DONE t-014` — the
-worker knows to run `msg orchestrator "DONE t-014, branch w1"`. Embedding paths
+path to `fleet-msg` or tell a worker who it is. Just say `reply DONE t-014` — the
+worker knows to run `fleet-msg orchestrator "DONE t-014, branch w1"`. Embedding paths
 like `/path/to/.fleet/bin/msg` wastes tool calls and tokens.
 
 ---
@@ -84,7 +84,7 @@ branch ready to review), `BLOCKED` (stuck — you must unblock).
 **Rules of the road:**
 - **Never send a bare acknowledgment.** No "ok", "thanks", "got it". A message
   must carry a task, an answer, or new information.
-- **Two planes.** Control plane = `msg` (short signals). Data plane = files
+- **Two planes.** Control plane = `fleet-msg` (short signals). Data plane = files
   (`tasks/*.md` specs, git branches for results, `BOARD.md` for state).
 - Workers may talk to each other directly (peer `ASK`/`ANS`), and everything is
   logged to `comms.log`. If a peer thread runs longer than 2 round-trips without
@@ -184,11 +184,11 @@ Do not add new dependencies without asking.
                 Write tasks/<id>.md.
                 Before sending the TASK, clear the worker's context so it
                 starts fresh (no stale history from prior tasks):
-                  msg workerN "/clear"
+                  fleet-msg workerN "/clear"
                 Then send the task:
-                  msg workerN "TASK <id>: read <path>"
+                  fleet-msg workerN "TASK <id>: read <path>"
                 Update BOARD.md: <id> -> ACTIVE, assignee, branch, files.
-4. SUPPORT      Answer ASKs fast (msg workerN "ANS <id>: ..."). Unblock
+4. SUPPORT      Answer ASKs fast (fleet-msg workerN "ANS <id>: ..."). Unblock
                 BLOCKED workers. Scan comms.log for peer threads needing you.
 5. REVIEW       On DONE, read `git diff main..w<n>`.
                 Before merging, verify the branch passes tests independently:
@@ -200,14 +200,14 @@ Do not add new dependencies without asking.
                 If tests fail, REVISE instead of merging (see below).
                 Then either:
                   - merge: `git merge --no-ff w<n>` (or cherry-pick), mark MERGED
-                  - or: msg workerN "REVISE <id>: read tasks/<id>.md ## Review"
+                  - or: fleet-msg workerN "REVISE <id>: read tasks/<id>.md ## Review"
                     (append what to fix to the spec file first)
 
                 If `git merge --no-ff w<n>` fails with conflicts:
                   - Do NOT resolve conflicts yourself (that counts as writing
                     code — it violates the hard rule in section 1).
                   - Abort the merge: `git merge --abort`
-                  - Send: msg workerN "REVISE <id>: merge conflict — rebase
+                  - Send: fleet-msg workerN "REVISE <id>: merge conflict — rebase
                     onto main, resolve, and re-submit DONE. Read
                     tasks/<id>.md ## Review for details."
                   - Append the conflict details to the task spec under
@@ -263,7 +263,7 @@ When you're in single-worker mode (or a worker finishes and nothing is ready for
 it), decide per-project what idle workers do. Pick one:
 
 - **Standby** (default for small/simple jobs) — do nothing, save tokens. Tell
-  them: `msg worker2 "FYI stand by, nothing to do yet"`.
+  them: `fleet-msg worker2 "FYI stand by, nothing to do yet"`.
 - **Review** — have an idle worker read the active branch and `ASK` you about
   anything risky before it merges.
 - **Tests** — assign an idle worker to write tests for already-merged work.
@@ -329,6 +329,6 @@ write `BOARD.md`, and show the human your plan. Then begin the loop.
 
 After the project is done (section 8 stop condition met), run:
 ```
-$FLEET_DIR/bin/learn
+fleet-learn
 ```
 This analyzes the run and appends findings to `learnings.md` for the next session.

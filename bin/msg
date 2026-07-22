@@ -47,4 +47,4 @@ else
 fi
 
 # Audit plane: one atomic append so the orchestrator (and you) can see all traffic.
-printf '%s %s\n' "$(date '+%H:%M:%S')" "$line" >> "$coord/comms.log"
+printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$line" >> "$coord/comms.log"

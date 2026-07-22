@@ -20,7 +20,8 @@ raise a question the moment the spec is unclear.
 
 - **Coordination dir:** `$FLEET_DIR` (absolute path in your env). Task specs live
   in `$FLEET_DIR/tasks/<id>.md`.
-- **Sending messages:** the `msg` command.
+- **Sending messages:** the `msg` command is already on your PATH (via
+  `$FLEET_DIR/bin`). Just use it directly — no full paths needed:
   ```
   msg orchestrator "DONE t-014, branch w1"
   msg worker2 "ASK: did you change the User type? I need it in auth.ts"

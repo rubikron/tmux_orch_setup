@@ -63,9 +63,10 @@ EOF
 fi
 # keep coordination noise and secrets out of the project's own history
 grep -qxF '.fleet/' "$REPO/.gitignore" 2>/dev/null || echo '.fleet/' >> "$REPO/.gitignore"
+grep -qxF '.worktrees/' "$REPO/.gitignore" 2>/dev/null || echo '.worktrees/' >> "$REPO/.gitignore"
 grep -qxF '.env.local' "$REPO/.gitignore" 2>/dev/null || echo '.env.local' >> "$REPO/.gitignore"
 # ---- worktrees for workers -------------------------------------------------
-WT_ROOT="$REPO/../$(basename "$REPO")-worktrees"
+WT_ROOT="$REPO/.worktrees"
 mkdir -p "$WT_ROOT"
 DEFAULT_BRANCH="$(git -C "$REPO" symbolic-ref --short HEAD)"
 for i in 1 2 3 4; do

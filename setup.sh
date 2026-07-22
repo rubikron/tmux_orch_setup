@@ -89,15 +89,17 @@ start_session () {
   tmux new-session -d -s "$name" -c "$dir"
   tmux send-keys -t "$name" "export FLEET_DIR='$FLEET_DIR'" Enter
   tmux send-keys -t "$name" "export PATH='$FLEET_DIR/bin':\"\$PATH\"" Enter
-  for kv in "${extra_env[@]:-}"; do
-    tmux send-keys -t "$name" "export $kv" Enter
-  done
   # Orchestrator and UI tester must use real Anthropic auth, never DeepSeek.
-  # If the calling shell has DeepSeek vars set (from a prior session), unset them.
+  # If the calling shell has DeepSeek vars set (from a prior session), unset them
+  # BEFORE the extra_env loop so that extra_env can override (e.g. worker4 sets
+  # ANTHROPIC_MODEL=claude-sonnet-5 after the blanket unset).
   if [[ "$name" == "orchestrator" || "$name" == "worker4" ]]; then
     tmux send-keys -t "$name" \
       "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL" Enter
   fi
+  for kv in "${extra_env[@]:-}"; do
+    tmux send-keys -t "$name" "export $kv" Enter
+  done
   tmux send-keys -t "$name" \
     "claude --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
 }

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# status — live dashboard for the Claude Code Fleet.
+#
+# Usage:
+#   bin/status                    # auto-detect FLEET_DIR from env or walk up from cwd
+#   FLEET_DIR=/path/to/.fleet bin/status
+#
+# Read-only — safe to run anytime, even while the fleet is active.
+# Uses tmux list-sessions, BOARD.md, comms.log, and metrics.jsonl.
+set -euo pipefail
+
+# ---- resolve coordination dir -----------------------------------------------
+FLEET_DIR="${FLEET_DIR:-}"
+if [[ -z "$FLEET_DIR" ]]; then
+  dir="$(pwd)"
+  while [[ "$dir" != "/" ]]; do
+    if [[ -d "$dir/.fleet" ]]; then
+      FLEET_DIR="$dir/.fleet"
+      break
+    fi
+    dir="$(dirname "$dir")"
+  done
+fi
+
+if [[ -z "$FLEET_DIR" || ! -d "$FLEET_DIR" ]]; then
+  echo "status: no .fleet/ coordination dir found — is the fleet running?" >&2
+  exit 1
+fi
+
+# ---- helpers -----------------------------------------------------------------
+dim()  { printf '\033[2m%s\033[0m' "$1"; }
+bold() { printf '\033[1m%s\033[0m' "$1"; }
+green() { printf '\033[32m%s\033[0m' "$1"; }
+red()   { printf '\033[31m%s\033[0m' "$1"; }
+yellow(){ printf '\033[33m%s\033[0m' "$1"; }
+
+# ---- session liveness --------------------------------------------------------
+SESSION_NAMES=(orchestrator worker1 worker2 worker3 worker4)
+alive=""
+dead=""
+for s in "${SESSION_NAMES[@]}"; do
+  if tmux has-session -t "$s" 2>/dev/null; then
+    alive+=" $(green "$s(up)")"
+  else
+    dead+=" $(red "$s(down)")"
+  fi
+done
+
+# ---- task board --------------------------------------------------------------
+board="$FLEET_DIR/BOARD.md"
+if [[ -f "$board" ]]; then
+  total=$(grep -cE '^\|' "$board" 2>/dev/null || true)
+  merged=$(grep -cE 'MERGED' "$board" 2>/dev/null || true)
+  active=$(grep -cE 'ACTIVE' "$board" 2>/dev/null || true)
+  blocked=$(grep -cE 'BLOCKED' "$board" 2>/dev/null || true)
+  queued=$(grep -cE 'QUEUED' "$board" 2>/dev/null || true)
+else
+  total=0; merged=0; active=0; blocked=0; queued=0
+fi
+
+# ---- messages ----------------------------------------------------------------
+comms="$FLEET_DIR/comms.log"
+if [[ -f "$comms" ]]; then
+  msg_count=$(wc -l < "$comms" 2>/dev/null | tr -d ' ')
+  last_msg=$(tail -1 "$comms" 2>/dev/null || echo "(none)")
+else
+  msg_count=0
+  last_msg="(no comms.log yet)"
+fi
+
+# ---- revises -----------------------------------------------------------------
+revise_count=$(grep -c 'REVISE' "$comms" 2>/dev/null || true)
+
+# ---- metrics -----------------------------------------------------------------
+metrics="$FLEET_DIR/metrics.jsonl"
+
+# ---- uptime ------------------------------------------------------------------
+if [[ -f "$comms" && -s "$comms" ]]; then
+  first_ts=$(head -1 "$comms" 2>/dev/null | cut -d' ' -f1)
+else
+  first_ts=""
+fi
+
+# ---- render ------------------------------------------------------------------
+echo
+echo "=== $(bold "Fleet Status") $(dim "$(date '+%H:%M:%S')") ==="
+echo
+echo "Sessions: $alive $dead"
+echo
+printf "Tasks:    %s total | %s merged | %s active | %s queued | %s blocked\n" \
+  "$total" "$(green "$merged")" "$(yellow "$active")" "$queued" "$(red "$blocked")"
+printf "Messages: %s total | last: %s\n" "$msg_count" "$(dim "$last_msg")"
+printf "Revises:  %s total\n" "$revise_count"
+if [[ -n "$first_ts" ]]; then
+  echo "Since:    $first_ts"
+fi
+echo
+
+# ---- recent activity ---------------------------------------------------------
+echo "=== $(bold "Recent Activity") ==="
+echo
+if [[ -f "$comms" ]]; then
+  tail -5 "$comms" 2>/dev/null | while IFS= read -r line; do
+    echo "  $line"
+  done
+else
+  echo "  $(dim "(no messages yet)")"
+fi
+echo
+
+# ---- worker summary ----------------------------------------------------------
+echo "=== $(bold "Worker Summary") ==="
+echo
+if [[ -f "$metrics" && -s "$metrics" ]]; then
+  for w in worker1 worker2 worker3 worker4; do
+    assigned=$(grep -c "\"assignee\":\"$w\"" "$metrics" 2>/dev/null || true)
+    wmerged=$(grep "\"assignee\":\"$w\"" "$metrics" 2>/dev/null | grep -c '"outcome":"merged"' 2>/dev/null || true)
+    wrevised=$(grep "\"assignee\":\"$w\"" "$metrics" 2>/dev/null | grep -c '"revises":[1-9]' 2>/dev/null || true)
+    if [[ "$assigned" -gt 0 ]]; then
+      printf "  %s: %s/%s merged, %s revised\n" "$w" "$wmerged" "$assigned" "$wrevised"
+    else
+      echo "  $w: $(dim "no tasks yet")"
+    fi
+  done
+else
+  echo "  $(dim "no metrics yet — tasks will appear here as they complete")"
+fi
+echo
+
+# ---- learnings ---------------------------------------------------------------
+learnings="$FLEET_DIR/learnings.md"
+if [[ -f "$learnings" ]]; then
+  echo "=== $(bold "Prior Learnings") ==="
+  echo
+  head -10 "$learnings"
+  echo
+  echo "  $(dim "... full log at $learnings")"
+  echo
+fi

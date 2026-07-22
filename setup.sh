@@ -105,8 +105,10 @@ start_session () {
     "claude --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
 }
 
-# Orchestrator: your normal Claude Code auth (Opus). No DeepSeek env.
-start_session orchestrator "$REPO" "$HERE/prompts/ORCHESTRATOR.md"
+# Orchestrator: Opus via real Anthropic auth. No DeepSeek env.
+ORCHESTRATOR_MODEL="${ORCHESTRATOR_MODEL:-claude-opus-4-8}"
+start_session orchestrator "$REPO" "$HERE/prompts/ORCHESTRATOR.md" \
+  "ANTHROPIC_MODEL=$ORCHESTRATOR_MODEL"
 
 # Workers 1-3: DeepSeek via the Anthropic-compatible endpoint.
 for i in 1 2 3; do

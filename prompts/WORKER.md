@@ -1,4 +1,4 @@
-<!-- version: 1.1.0 -->
+<!-- version: 1.2.0 -->
 # Worker Operating Manual (DeepSeek Implementer)
 
 You are one of three implementers on a small team. Your session name is your
@@ -67,8 +67,10 @@ work), `FYI` (heads-up).
              has conflicts you can't trivially resolve, ASK the
              orchestrator — don't force it. Do this before every new task,
              not just when you know you depend on another worker's changes.
-1. RECEIVE   A `TASK` arrives pointing to a spec. Read $FLEET_DIR/tasks/<id>.md
-             fully.
+1. RECEIVE   The orchestrator sends `/clear` before each TASK, so you start
+             with a fresh context — no stale history from prior tasks. A
+             `TASK` message arrives pointing to a spec. Read
+             $FLEET_DIR/tasks/<id>.md fully.
 2. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
 3. IMPLEMENT Make the change on your branch. Touch only the listed files.
              Match the codebase's existing style. Run the build/tests locally.

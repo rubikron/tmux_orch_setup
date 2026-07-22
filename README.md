@@ -91,14 +91,35 @@ Start by giving me the plan.
 
 ```
 fleet/
-├── setup.sh              spin up worktrees + tmux + 4 Claude Code sessions
+├── setup.sh              spin up worktrees + tmux + 5 Claude Code sessions
 ├── teardown.sh           kill sessions, remove worker worktrees
-├── bin/msg               one-line inter-agent messenger (send-keys + comms.log)
+├── bin/
+│   ├── msg               one-line inter-agent messenger (send-keys + comms.log)
+│   ├── status            live fleet dashboard (sessions, tasks, traffic)
+│   └── learn             post-run analysis (metrics → learnings.md)
 ├── prompts/
 │   ├── ORCHESTRATOR.md   Opus tech-lead operating manual
-│   └── WORKER.md         DeepSeek implementer operating manual
+│   ├── WORKER.md         DeepSeek implementer operating manual
+│   └── UI_TESTER.md      Sonnet UI testing specialist manual
 └── README.md             this file
 ```
+
+## Observability
+
+The fleet records structured metrics and supports live monitoring:
+
+| Command | Description |
+|---------|-------------|
+| `bin/status` | Live dashboard: session health, task board, recent traffic, worker stats |
+| `bin/learn` | Post-run analysis: REVISE rates, worker utilization, task-size patterns, suggestions |
+
+**Metrics:** The orchestrator appends one JSON line per task to `.fleet/metrics.jsonl`.
+After teardown, run `bin/learn` to analyze the run and append findings to
+`.fleet/learnings.md`. The orchestrator reads prior learnings on startup and
+incorporates them into its planning.
+
+**Prompt versions:** Each prompt file carries a version header (`<!-- version: X.Y.Z -->`).
+When you edit a prompt, bump the version so `bin/learn` can correlate changes with outcomes.
 
 ## Tuning notes
 

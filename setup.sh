@@ -46,9 +46,14 @@ git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 FLEET_DIR="$REPO/.fleet"
 mkdir -p "$FLEET_DIR/tasks" "$FLEET_DIR/bin"
 cp "$HERE/bin/msg" "$FLEET_DIR/bin/msg"
-chmod +x "$FLEET_DIR/bin/msg"
-# Persist comms.log across runs (matching BOARD.md behavior) for audit trail.
+cp "$HERE/bin/status" "$FLEET_DIR/bin/status"
+cp "$HERE/bin/learn" "$FLEET_DIR/bin/learn"
+chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn"
+# Persist comms.log and metrics.jsonl across runs for audit trail.
 touch "$FLEET_DIR/comms.log"
+if [[ ! -f "$FLEET_DIR/metrics.jsonl" ]]; then
+  touch "$FLEET_DIR/metrics.jsonl"
+fi
 if [[ ! -f "$FLEET_DIR/BOARD.md" ]]; then
   cat > "$FLEET_DIR/BOARD.md" <<'EOF'
 # Task Board  (owned by the orchestrator)

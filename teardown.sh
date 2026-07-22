@@ -4,7 +4,7 @@
 # Branches w1/w2/w3/w4 are kept so you don't lose unmerged work; delete manually if desired.
 set -euo pipefail
 REPO="$(cd "${1:-$(pwd)}" && pwd)"
-WT_ROOT="$REPO/../$(basename "$REPO")-worktrees"
+WT_ROOT="$REPO/.worktrees"
 
 for s in orchestrator worker1 worker2 worker3 worker4; do
   tmux kill-session -t "$s" 2>/dev/null && echo "killed session $s" || true

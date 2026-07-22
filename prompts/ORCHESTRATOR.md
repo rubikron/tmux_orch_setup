@@ -53,17 +53,22 @@ It contains:
 fleet state: session health, task board, traffic, and worker summaries.
 Metrics are recorded to `metrics.jsonl` and analyzed post-run with `learn`.
 
-**Sending a message** — use the `msg` command from your shell:
+**Sending a message** — use `$FLEET_DIR/bin/msg` (the env-var-based absolute
+path — always works, no PATH issues). The pattern:
 ```
-msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
+$FLEET_DIR/bin/msg <target-session> "<type> <content>"
 ```
-Messages are ONE short line. Rich content goes in files; messages point to them.
+Example: `$FLEET_DIR/bin/msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"`
 
-**Important:** Every worker already has `$FLEET_DIR/bin` on its PATH and knows
-its own identity (session name, branch). You do NOT need to spell out the full
-path to `msg` or tell a worker who it is. Just say `reply DONE t-014` — the
-worker knows to run `msg orchestrator "DONE t-014, branch w1"`. Embedding paths
-like `/path/to/.fleet/bin/msg` wastes tool calls and tokens.
+That's it. One line, no identity preamble. Messages are ONE short line.
+Rich content goes in files; messages point to them.
+
+**Important:** The `msg` command might not be on the Bash tool's PATH, so always
+use the `$FLEET_DIR/bin/msg` form above. No hardcoded paths — `$FLEET_DIR` is
+always set in your environment. Every worker already knows its own identity
+(session name, branch). You do NOT need to tell a worker who it is. Just say
+`reply DONE t-014` — the worker knows to run `$FLEET_DIR/bin/msg orchestrator
+"DONE t-014, branch w1"`.
 
 ---
 

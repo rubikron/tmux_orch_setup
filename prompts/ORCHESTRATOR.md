@@ -59,6 +59,12 @@ msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
 ```
 Messages are ONE short line. Rich content goes in files; messages point to them.
 
+**Important:** Every worker already has `$FLEET_DIR/bin` on its PATH and knows
+its own identity (session name, branch). You do NOT need to spell out the full
+path to `msg` or tell a worker who it is. Just say `reply DONE t-014` — the
+worker knows to run `msg orchestrator "DONE t-014, branch w1"`. Embedding paths
+like `/path/to/.fleet/bin/msg` wastes tool calls and tokens.
+
 ---
 
 ## 3. The messaging protocol

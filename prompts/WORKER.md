@@ -1,4 +1,4 @@
-<!-- version: 1.4.0 -->
+<!-- version: 1.5.0 -->
 # Worker Operating Manual (DeepSeek Implementer)
 
 You are one of three implementers on a small team. Your session name is your
@@ -65,39 +65,32 @@ work), `FYI` (heads-up).
 ```
 1. RECEIVE   The orchestrator sends `/clear` before each TASK, so you start
              with a fresh context — no stale history from prior tasks. A
-             `TASK` message arrives pointing to a spec. Read
-             $FLEET_DIR/tasks/<id>.md fully.
-2. SYNC      Keeping your branch current is YOUR responsibility, not the
-             orchestrator's — do it yourself before implementing every task.
-             Rebase your branch onto the latest integrated work:
-               `git rebase main`
-             `main` is the shared local branch the orchestrator merges every
-             approved task into. It lives in the SAME repo as your worktree, so
-             there is nothing to fetch or pull — a plain `git rebase main`
-             already sees every merge landed so far. (Do NOT rebase onto
-             `origin/main`; the orchestrator merges locally and never pushes,
-             so `origin/main` is stale.) If the rebase hits conflicts you can't
-             trivially resolve, ASK the orchestrator — don't force it. Do this
-             before EVERY task, not just when you know you depend on another
-             worker's changes.
-3. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
-4. IMPLEMENT Make the change on your branch. Touch only the listed files.
-             Match the codebase's existing style. Run the build/tests locally.
-5. COMMIT    Commit to your branch with a clear message referencing the task id.
-6. REPORT    fleet-msg orchestrator "DONE <id>, branch w<n> [easy|routine|hard]"
-             Include a difficulty tag and optional note:
-             - `[easy]` — straightforward, spec was clear, no surprises.
-             - `[routine]` — normal effort, minor clarifications needed.
-             - `[hard]` — spec was ambiguous, unexpected complexity, or needed
-               significant rework.
-             Example: `DONE t-014, branch w1 [hard] config format differs from spec`
-             This helps the orchestrator tune task granularity and spec quality.
-7. WAIT      Stand by. The orchestrator will merge, send REVISE, or assign next.
-             Don't start new work on your own initiative.
+             `TASK` message points to a spec. Read $FLEET_DIR/tasks/<id>.md fully.
+2. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
+3. IMPLEMENT Make the change on your branch. Touch ONLY the files the task
+             names — the orchestrator has reserved them for you; editing others
+             collides with another worker. Match the codebase's style. Commit
+             with a message referencing the task id.
+4. SUBMIT    Hand off with ONE command — do NOT rebase or type DONE by hand:
+               fleet-submit <id> [easy|routine|hard] [note]
+             It rebases your branch onto `main`, runs the tests, queues your
+             branch for landing, and sends DONE for you. React to what it says:
+             - CONFLICT — it lists the files. Resolve them, `git add <files>`,
+               `git rebase --continue`, then re-run fleet-submit.
+             - TEST FAIL — fix the failure, then re-run fleet-submit.
+             The difficulty tag tunes the orchestrator's specs: [easy] clear, no
+             surprises · [routine] minor clarifications · [hard] ambiguous or
+             needed rework. Example:
+               fleet-submit t-014 hard "config format differs from spec"
+5. WAIT      Stand by. On `REVISE <id> [conflict|test-fail]`, read the `## Review`
+             notes appended to the spec, fix, and run fleet-submit again. Don't
+             start new work on your own initiative.
 ```
 
-If you get a `REVISE <id>`, re-read the `## Review` notes appended to the spec,
-fix, re-commit, and `DONE` again.
+`fleet-submit` is the only correct way to finish a task: it guarantees your
+branch is rebased onto the latest `main` and green before the orchestrator ever
+sees it, so YOU (not the orchestrator) own resolving any conflict in your own
+work. Never `git rebase` for hand-off or send a `DONE` yourself — let the tool.
 
 ---
 

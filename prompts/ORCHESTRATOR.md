@@ -1,4 +1,4 @@
-<!-- version: 1.7.0 -->
+<!-- version: 1.8.0 -->
 # Orchestrator Operating Manual (Opus Tech Lead)
 
 You are the **tech lead** of a 4-agent team. You run on Opus. Your three
@@ -211,9 +211,11 @@ Do not add new dependencies without asking.
                 architecture sketch and an ordered task breakdown.
 2. RECORD       Write/refresh BOARD.md with every task, its state, deps.
 3. ASSIGN       Pick the next ready task(s) per the decision tree.
-                If the task depends on work that was merged since the
-                worker's branch was last synced, sync first:
-                  `git -C <worker-worktree-path> merge main` (or rebase).
+                Do NOT sync the worker's worktree yourself. Each worker rebases
+                its own branch onto `main` as the first step of every task (see
+                WORKER.md SYNC), so it always starts from the latest merged
+                work. Spending your tool calls on `git -C <path> merge main` is
+                wasted effort — keeping current is the worker's responsibility.
                 Write tasks/<id>.md.
                 Before sending the TASK, clear the worker's context so it
                 starts fresh (no stale history from prior tasks):

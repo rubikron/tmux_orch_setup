@@ -156,11 +156,11 @@ start_session () {
     tmux send-keys -t "$name" "export $kv" Enter
   done
   # Worker sessions run unattended in isolated worktrees, so they launch in auto
-  # mode (permissions bypassed) — no manual approval per session. The orchestrator
-  # is driven interactively (you paste the goal into it), so it keeps prompts on.
+  # permission mode — no manual approval per session. The orchestrator is driven
+  # interactively (you paste the goal into it), so it keeps prompts on.
   local auto=""
   if [[ "$name" == worker* ]]; then
-    auto=" --dangerously-skip-permissions"
+    auto=" --permission-mode auto"
   fi
   tmux send-keys -t "$name" \
     "claude$auto --append-system-prompt \"\$(cat '$prompt_file')\"" Enter

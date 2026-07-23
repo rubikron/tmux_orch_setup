@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# claim — file-ownership ledger for the fleet (partition by construction).
+#
+# Installed under three names; behavior is keyed off how it was invoked:
+#   fleet-claim   <task-id> <worker> <file>...   claim files for a task (atomic)
+#   fleet-release <task-id>                       drop all of a task's claims
+#   fleet-claims                                  list current ownership
+#
+# A claim FAILS (exit 3) if any requested file is already owned by a DIFFERENT
+# active task — so the orchestrator physically cannot hand two parallel workers
+# the same file. Overlap forces serialization instead of a merge fight.
+#
+# State: $FLEET_DIR/claims.tsv   (task-id <TAB> worker <TAB> file)
+set -euo pipefail
+
+# ---- resolve coordination dir (env, else walk up for .fleet) -----------------
+FLEET_DIR="${FLEET_DIR:-}"
+if [[ -z "$FLEET_DIR" ]]; then
+  dir="$(pwd)"
+  while [[ "$dir" != "/" ]]; do
+    [[ -d "$dir/.fleet" ]] && { FLEET_DIR="$dir/.fleet"; break; }
+    dir="$(dirname "$dir")"
+  done
+fi
+[[ -n "$FLEET_DIR" && -d "$FLEET_DIR" ]] || { echo "$(basename "$0"): no .fleet dir found" >&2; exit 1; }
+
+ledger="$FLEET_DIR/claims.tsv"
+touch "$ledger"
+
+# ---- lock (graceful if flock absent, e.g. stock macOS) -----------------------
+_lock()   { exec 9>"$FLEET_DIR/.lock.claims" 2>/dev/null || true; flock -w 5 9 2>/dev/null || true; }
+_unlock() { flock -u 9 2>/dev/null || true; }
+
+cmd="$(basename "$0")"
+
+case "$cmd" in
+  fleet-claim|claim)
+    [[ $# -ge 3 ]] || { echo "usage: fleet-claim <task-id> <worker> <file>..." >&2; exit 1; }
+    task="$1"; worker="$2"; shift 2
+    _lock
+    # First pass: detect contention against OTHER tasks. All-or-nothing.
+    conflicts=""
+    for f in "$@"; do
+      owner="$(awk -F'\t' -v f="$f" -v t="$task" '$3==f && $1!=t {print $1"/"$2}' "$ledger" | head -1)"
+      [[ -n "$owner" ]] && conflicts+="  $f → held by $owner"$'\n'
+    done
+    if [[ -n "$conflicts" ]]; then
+      _unlock
+      echo "CONTENTION — claim refused for $task:" >&2
+      printf '%s' "$conflicts" >&2
+      echo "Serialize onto the current owner, or queue this task until they land." >&2
+      exit 3
+    fi
+    # Second pass: record (skip exact duplicates so re-claims are idempotent).
+    for f in "$@"; do
+      if ! awk -F'\t' -v t="$task" -v f="$f" '$1==t && $3==f {found=1} END{exit !found}' "$ledger"; then
+        printf '%s\t%s\t%s\n' "$task" "$worker" "$f" >> "$ledger"
+      fi
+    done
+    _unlock
+    echo "claimed for $task ($worker): $*"
+    ;;
+
+  fleet-release|release)
+    [[ $# -ge 1 ]] || { echo "usage: fleet-release <task-id>" >&2; exit 1; }
+    task="$1"
+    _lock
+    tmp="$ledger.tmp.$$"
+    awk -F'\t' -v t="$task" '$1!=t' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
+    _unlock
+    echo "released claims for $task"
+    ;;
+
+  fleet-claims|claims)
+    if [[ ! -s "$ledger" ]]; then echo "(no files claimed)"; exit 0; fi
+    echo "task        worker    file"
+    echo "----------- --------- --------------------------------"
+    awk -F'\t' '{printf "%-11s %-9s %s\n", $1, $2, $3}' "$ledger"
+    ;;
+
+  *)
+    echo "$cmd: unknown invocation (expected fleet-claim/fleet-release/fleet-claims)" >&2
+    exit 1
+    ;;
+esac

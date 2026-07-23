@@ -1,4 +1,4 @@
-<!-- version: 1.2.0 -->
+<!-- version: 1.3.0 -->
 # Worker Operating Manual (DeepSeek Implementer)
 
 You are one of three implementers on a small team. Your session name is your

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# submit — a worker's gated hand-off. Run this INSTEAD of rebasing + typing DONE.
+#
+# Usage:  fleet-submit <task-id> [easy|routine|hard] [note...]
+#
+# It guarantees a DONE only ever exists after a clean rebase onto the integration
+# branch AND green local tests — so conflict resolution stays with the author and
+# the orchestrator receives branches that already apply cleanly. Steps:
+#   1. refuse if the worktree has uncommitted changes (commit your work first)
+#   2. git rebase <MAIN_BRANCH>   — on conflict, stop and make you resolve
+#   3. run TEST_CMD               — on failure, stop and make you fix
+#   4. enqueue this branch for landing ($FLEET_DIR/merge-queue)
+#   5. send DONE to the orchestrator for you
+set -euo pipefail
+
+FLEET_DIR="${FLEET_DIR:-}"
+if [[ -z "$FLEET_DIR" ]]; then
+  dir="$(pwd)"
+  while [[ "$dir" != "/" ]]; do
+    [[ -d "$dir/.fleet" ]] && { FLEET_DIR="$dir/.fleet"; break; }
+    dir="$(dirname "$dir")"
+  done
+fi
+[[ -n "$FLEET_DIR" && -d "$FLEET_DIR" ]] || { echo "$(basename "$0"): no .fleet dir found" >&2; exit 1; }
+
+[[ $# -ge 1 ]] || { echo "usage: fleet-submit <task-id> [difficulty] [note...]" >&2; exit 1; }
+task="$1"; shift
+difficulty="${1:-routine}"; [[ $# -ge 1 ]] && shift || true
+note="$*"
+
+# ---- config ------------------------------------------------------------------
+MAIN_BRANCH="main"; TEST_CMD=""
+[[ -f "$FLEET_DIR/fleet.conf" ]] && . "$FLEET_DIR/fleet.conf"
+
+worker="$(tmux display-message -p '#S' 2>/dev/null || echo worker)"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+
+# resolve the message tool (PATH symlink, else the copy setup drops in .fleet/bin)
+msg() { if command -v fleet-msg >/dev/null 2>&1; then fleet-msg "$@"; else "$FLEET_DIR/bin/msg" "$@"; fi; }
+
+# ---- 1. clean tree -----------------------------------------------------------
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "✗ uncommitted changes on $branch. Commit your work, then re-run fleet-submit." >&2
+  exit 1
+fi
+
+# ---- 2. rebase onto the integration branch -----------------------------------
+if ! git rebase "$MAIN_BRANCH"; then
+  echo >&2
+  echo "✗ CONFLICT rebasing $branch onto $MAIN_BRANCH. Conflicted files:" >&2
+  git diff --name-only --diff-filter=U | sed 's/^/    /' >&2
+  echo "  Resolve them, then:  git add <files> && git rebase --continue" >&2
+  echo "  When the rebase finishes, re-run:  fleet-submit $task $difficulty $note" >&2
+  exit 2
+fi
+
+# ---- 3. local tests ----------------------------------------------------------
+if [[ -n "$TEST_CMD" ]]; then
+  echo "running tests: $TEST_CMD"
+  if ! eval "$TEST_CMD"; then
+    echo "✗ tests failed on $branch. Fix them and re-run fleet-submit." >&2
+    exit 4
+  fi
+fi
+
+# ---- 4. enqueue for landing --------------------------------------------------
+exec 9>"$FLEET_DIR/.lock.queue" 2>/dev/null || true
+flock -w 5 9 2>/dev/null || true
+printf '%s\t%s\t%s\n' "$task" "$branch" "$worker" >> "$FLEET_DIR/merge-queue"
+flock -u 9 2>/dev/null || true
+
+# ---- 5. announce DONE for the worker -----------------------------------------
+msg orchestrator "DONE $task, branch $branch [$difficulty]${note:+ $note}"
+echo "✓ $task rebased, tested, queued for landing, and DONE sent."

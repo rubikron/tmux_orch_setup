@@ -51,7 +51,11 @@ mkdir -p "$FLEET_DIR/tasks" "$FLEET_DIR/bin"
 cp "$HERE/bin/msg" "$FLEET_DIR/bin/msg"
 cp "$HERE/bin/status" "$FLEET_DIR/bin/status"
 cp "$HERE/bin/learn" "$FLEET_DIR/bin/learn"
-chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn"
+cp "$HERE/bin/claim" "$FLEET_DIR/bin/claim"
+cp "$HERE/bin/submit" "$FLEET_DIR/bin/submit"
+cp "$HERE/bin/land" "$FLEET_DIR/bin/land"
+chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn" \
+         "$FLEET_DIR/bin/claim" "$FLEET_DIR/bin/submit" "$FLEET_DIR/bin/land"
 
 # ---- global CLI install ----------------------------------------------------
 # Why: the tmux panes add $FLEET_DIR/bin to PATH, so the tools resolve when a
@@ -67,6 +71,12 @@ mkdir -p "$LOCAL_BIN"
 ln -sf "$HERE/bin/msg"    "$LOCAL_BIN/fleet-msg"
 ln -sf "$HERE/bin/status" "$LOCAL_BIN/fleet-status"
 ln -sf "$HERE/bin/learn"  "$LOCAL_BIN/fleet-learn"
+# claim is one script dispatched by invocation name → three symlinks.
+ln -sf "$HERE/bin/claim"  "$LOCAL_BIN/fleet-claim"
+ln -sf "$HERE/bin/claim"  "$LOCAL_BIN/fleet-release"
+ln -sf "$HERE/bin/claim"  "$LOCAL_BIN/fleet-claims"
+ln -sf "$HERE/bin/submit" "$LOCAL_BIN/fleet-submit"
+ln -sf "$HERE/bin/land"   "$LOCAL_BIN/fleet-land"
 case ":$PATH:" in
   *":$LOCAL_BIN:"*) : ;;  # already on PATH — good
   *) echo "warning: $LOCAL_BIN is not on your PATH. Add it (e.g. in ~/.zshrc:" \
@@ -133,6 +143,42 @@ for i in 1 2 3 4; do
     git -C "$REPO" worktree add -b "w$i" "$wt" "$DEFAULT_BRANCH"
   fi
 done
+
+# ---- integration tooling: state + config -----------------------------------
+# Ledger (claimed files) and the merge queue used by fleet-claim / fleet-land.
+touch "$FLEET_DIR/claims.tsv" "$FLEET_DIR/merge-queue"
+
+# Detect the project's test command once so fleet-submit and fleet-land can test
+# the merged tree. Written only if fleet.conf is absent, so manual edits survive
+# re-runs. Empty TEST_CMD = skip auto-testing.
+detect_test_cmd() {
+  if [[ -f "$REPO/package.json" ]] && grep -q '"test"[[:space:]]*:' "$REPO/package.json"; then
+    if [[ -f "$REPO/pnpm-lock.yaml" ]]; then echo "pnpm test"; else echo "npm test"; fi
+  elif { [[ -f "$REPO/pyproject.toml" || -f "$REPO/setup.py" || -d "$REPO/tests" ]]; } && command -v pytest >/dev/null 2>&1; then
+    echo "pytest -q"
+  elif [[ -f "$REPO/Cargo.toml" ]]; then echo "cargo test"
+  elif [[ -f "$REPO/go.mod" ]]; then echo "go test ./..."
+  elif [[ -f "$REPO/Makefile" ]] && grep -qE '^test:' "$REPO/Makefile"; then echo "make test"
+  else echo ""
+  fi
+}
+
+if [[ ! -f "$FLEET_DIR/fleet.conf" ]]; then
+  TEST_CMD_DETECTED="$(detect_test_cmd)"
+  cat > "$FLEET_DIR/fleet.conf" <<CONFEOF
+# Fleet integration config — sourced by fleet-submit and fleet-land.
+# Edit freely; re-running setup.sh will NOT overwrite this file.
+MAIN_BRANCH="$DEFAULT_BRANCH"
+# Command that verifies a branch (locally, in fleet-submit) and the merged tree
+# (on land, in fleet-land). Empty = skip auto-testing and test manually.
+TEST_CMD="$TEST_CMD_DETECTED"
+CONFEOF
+  if [[ -n "$TEST_CMD_DETECTED" ]]; then
+    echo "detected test command: $TEST_CMD_DETECTED   (edit $FLEET_DIR/fleet.conf to change)"
+  else
+    echo "no test command detected — set TEST_CMD in $FLEET_DIR/fleet.conf to enable merged-tree testing"
+  fi
+fi
 
 # ---- launch helper ---------------------------------------------------------
 # Starts a detached tmux session, exports the shared env, then runs claude with

@@ -108,6 +108,26 @@ else
 fi
 echo
 
+# ---- integration: merge queue + claimed files --------------------------------
+queue="$FLEET_DIR/merge-queue"
+claims="$FLEET_DIR/claims.tsv"
+if [[ -f "$queue" || -f "$claims" ]]; then
+  qdepth=0; [[ -f "$queue" ]] && qdepth=$(grep -c . "$queue" 2>/dev/null || true)
+  cdepth=0; [[ -f "$claims" ]] && cdepth=$(grep -c . "$claims" 2>/dev/null || true)
+  echo "=== $(bold "Integration") ==="
+  echo
+  printf "Merge queue: %s waiting | Claimed files: %s\n" "$(yellow "$qdepth")" "$cdepth"
+  if [[ "${qdepth:-0}" -gt 0 ]]; then
+    echo "  next to land:"
+    head -3 "$queue" | while IFS=$'\t' read -r t b w; do echo "    $(bold "$t")  $b  $(dim "$w")"; done
+  fi
+  if [[ "${cdepth:-0}" -gt 0 ]]; then
+    echo "  files in flight:"
+    awk -F'\t' '{printf "    %s  %s\n", $3, $1}' "$claims" | head -8
+  fi
+  echo
+fi
+
 # ---- worker summary ----------------------------------------------------------
 echo "=== $(bold "Worker Summary") ==="
 echo

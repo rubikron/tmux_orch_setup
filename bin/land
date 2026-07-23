@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# land — the orchestrator's merge queue. Run this INSTEAD of `git merge`.
+#
+# Usage:  fleet-land [--all]        (default: land one; --all: drain the queue)
+#
+# Holds a fleet-wide lock so only ONE land happens at a time (a merge queue of
+# one). For each queued branch it: attempts the merge onto the CURRENT main
+# (clean-or-abort — never asks you to resolve), tests the MERGED tree, then
+# either lands it or bounces it back to its author with a REVISE. On any failure
+# the author fixes and re-submits; the orchestrator never resolves a conflict.
+#
+# Queue: $FLEET_DIR/merge-queue   (task-id <TAB> branch <TAB> worker)
+set -euo pipefail
+
+FLEET_DIR="${FLEET_DIR:-}"
+if [[ -z "$FLEET_DIR" ]]; then
+  dir="$(pwd)"
+  while [[ "$dir" != "/" ]]; do
+    [[ -d "$dir/.fleet" ]] && { FLEET_DIR="$dir/.fleet"; break; }
+    dir="$(dirname "$dir")"
+  done
+fi
+[[ -n "$FLEET_DIR" && -d "$FLEET_DIR" ]] || { echo "$(basename "$0"): no .fleet dir found" >&2; exit 1; }
+
+MAIN_BRANCH="main"; TEST_CMD=""
+[[ -f "$FLEET_DIR/fleet.conf" ]] && . "$FLEET_DIR/fleet.conf"
+
+drain=0; [[ "${1:-}" == "--all" ]] && drain=1
+
+queue="$FLEET_DIR/merge-queue"; touch "$queue"
+msg()     { if command -v fleet-msg >/dev/null 2>&1;     then fleet-msg "$@";     else "$FLEET_DIR/bin/msg" "$@"; fi; }
+release() { command -v fleet-release >/dev/null 2>&1 && fleet-release "$1" >/dev/null 2>&1 || true; }
+
+# ---- must be on the integration branch ---------------------------------------
+cur="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+if [[ "$cur" != "$MAIN_BRANCH" ]]; then
+  echo "✗ fleet-land must run on '$MAIN_BRANCH' (you are on '$cur')." >&2
+  exit 1
+fi
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "✗ $MAIN_BRANCH has uncommitted changes — resolve before landing." >&2
+  exit 1
+fi
+
+# ---- serialize: fleet-wide merge lock ----------------------------------------
+exec 9>"$FLEET_DIR/.lock.merge" 2>/dev/null || true
+flock -w 30 9 2>/dev/null || true
+
+pop_head() {   # remove the first queue line atomically
+  exec 8>"$FLEET_DIR/.lock.queue" 2>/dev/null || true
+  flock -w 5 8 2>/dev/null || true
+  tmp="$queue.tmp.$$"; tail -n +2 "$queue" > "$tmp" && mv "$tmp" "$queue"
+  flock -u 8 2>/dev/null || true
+}
+
+bounce() {     # $1=task $2=worker $3=reason-tag $4=detail
+  local task="$1" worker="$2" tag="$3" detail="$4" spec="$FLEET_DIR/tasks/$1.md"
+  {
+    echo; echo "## Review — bounced [$tag] $(date '+%Y-%m-%dT%H:%M:%S')"
+    echo "$detail"
+  } >> "$spec" 2>/dev/null || true
+  msg "$worker" "REVISE $task [$tag]: rebase onto $MAIN_BRANCH, fix, resubmit — see tasks/$task.md ## Review"
+  echo "↩ bounced $task to $worker [$tag]"
+}
+
+land_one() {
+  [[ -s "$queue" ]] || { echo "queue empty — nothing to land."; return 10; }
+  local line task branch worker
+  line="$(head -1 "$queue")"
+  task="$(printf '%s' "$line" | cut -f1)"
+  branch="$(printf '%s' "$line" | cut -f2)"
+  worker="$(printf '%s' "$line" | cut -f3)"
+  echo "── landing $task ($branch, $worker) ──"
+
+  local before; before="$(git rev-parse HEAD)"
+
+  # gate 1: does it merge cleanly onto the current main? (clean-or-abort)
+  if ! git merge --no-ff --no-edit "$branch" >/dev/null 2>&1; then
+    local files; files="$(git diff --name-only --diff-filter=U 2>/dev/null | sed 's/^/- /')"
+    git merge --abort 2>/dev/null || true
+    pop_head
+    bounce "$task" "$worker" "conflict" "Conflicts against current $MAIN_BRANCH in:"$'\n'"$files"
+    return 3
+  fi
+
+  # gate 2: does the MERGED tree pass tests? (catches semantic conflicts)
+  if [[ -n "$TEST_CMD" ]]; then
+    echo "testing merged tree: $TEST_CMD"
+    if ! eval "$TEST_CMD" >/tmp/fleet-land.$$.log 2>&1; then
+      local tail_out; tail_out="$(tail -20 /tmp/fleet-land.$$.log)"
+      rm -f /tmp/fleet-land.$$.log
+      git reset --hard "$before" >/dev/null 2>&1
+      pop_head
+      bounce "$task" "$worker" "test-fail" "Merged tree failed tests. Last lines:"$'\n'"$tail_out"
+      return 4
+    fi
+    rm -f /tmp/fleet-land.$$.log
+  fi
+
+  # landed. release the task's file claims + record a metric line.
+  pop_head
+  release "$task"
+  local nfiles; nfiles="$(git diff --stat "$before"..HEAD 2>/dev/null | tail -1 | grep -oE '[0-9]+ file' | grep -oE '[0-9]+' || echo 0)"
+  printf '{"task":"%s","type":"","assignee":"%s","assigned":"","done":"","merged":"%s","revises":0,"files":%s,"outcome":"merged","block_reason":""}\n' \
+    "$task" "$worker" "$(date '+%H:%M')" "${nfiles:-0}" >> "$FLEET_DIR/metrics.jsonl"
+  msg "$worker" "FYI $task landed on $MAIN_BRANCH"
+  echo "✓ landed $task"
+  return 0
+}
+
+rc=0
+if [[ $drain -eq 1 ]]; then
+  while :; do
+    land_one; r=$?
+    [[ $r -eq 10 ]] && break          # queue empty
+    [[ $r -ne 0 ]] && rc=$r           # remember last non-zero (a bounce) but keep draining
+  done
+else
+  land_one; rc=$?
+  [[ $rc -eq 10 ]] && rc=0
+fi
+
+flock -u 9 2>/dev/null || true
+exit $rc

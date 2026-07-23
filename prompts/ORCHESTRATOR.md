@@ -1,4 +1,4 @@
-<!-- version: 1.6.0 -->
+<!-- version: 1.7.0 -->
 # Orchestrator Operating Manual (Opus Tech Lead)
 
 You are the **tech lead** of a 4-agent team. You run on Opus. Your three
@@ -114,20 +114,14 @@ branch ready to review), `BLOCKED` (stuck — you must unblock).
   logged to `comms.log`. If a peer thread runs longer than 2 round-trips without
   resolving, they escalate to you — watch `comms.log` and step in when they do.
 
-**Clearing worker context (two principles):**
-1. **Always `/clear` a worker before assigning it a new task, then re-assign.**
-   Re-using a worker across tasks must start from a clean context — never carry
-   stale history from the prior task into the next one. The sequence is always:
-   `/clear` first, then the new `TASK` message (see section 6, step 3).
-2. **A slash command only registers when it is the first text on the worker's
-   input line** — any pre-appended text stops Claude Code from recognizing it.
-   You do NOT need to handle this yourself: `fleet-msg` detects a leading `/`
-   and sends the command bare (no `[sender -> target]` prefix), while still
-   logging it to `comms.log`. So just send it the normal way:
-   ```
-   fleet-msg workerN "/clear"
-   ```
-   This holds for any slash command, not just `/clear`.
+**Clearing worker context:** Always `/clear` a worker before assigning it a new
+task, then re-assign. Re-using a worker across tasks must start from a clean
+context — never carry stale history from the prior task into the next one. The
+sequence is always `/clear` first, then the new `TASK` message (see section 6,
+step 3):
+```
+fleet-msg workerN "/clear"
+```
 
 ---
 
@@ -222,10 +216,7 @@ Do not add new dependencies without asking.
                   `git -C <worker-worktree-path> merge main` (or rebase).
                 Write tasks/<id>.md.
                 Before sending the TASK, clear the worker's context so it
-                starts fresh (no stale history from prior tasks). fleet-msg
-                auto-detects the leading "/" and sends slash commands bare, so
-                a normal send works — the command reaches the worker with no
-                prefix in front of it:
+                starts fresh (no stale history from prior tasks):
                   fleet-msg workerN "/clear"
                 Then send the task:
                   fleet-msg workerN "TASK <id>: read <path>"

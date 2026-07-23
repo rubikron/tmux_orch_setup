@@ -1,4 +1,4 @@
-<!-- version: 1.3.0 -->
+<!-- version: 1.4.0 -->
 # Worker Operating Manual (DeepSeek Implementer)
 
 You are one of three implementers on a small team. Your session name is your
@@ -63,20 +63,28 @@ work), `FYI` (heads-up).
 ## 4. Your work loop
 
 ```
-0. SYNC      Before implementing, rebase your branch onto `main`:
-             `git fetch origin && git rebase origin/main`. If the rebase
-             has conflicts you can't trivially resolve, ASK the
-             orchestrator — don't force it. Do this before every new task,
-             not just when you know you depend on another worker's changes.
 1. RECEIVE   The orchestrator sends `/clear` before each TASK, so you start
              with a fresh context — no stale history from prior tasks. A
              `TASK` message arrives pointing to a spec. Read
              $FLEET_DIR/tasks/<id>.md fully.
-2. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
-3. IMPLEMENT Make the change on your branch. Touch only the listed files.
+2. SYNC      Keeping your branch current is YOUR responsibility, not the
+             orchestrator's — do it yourself before implementing every task.
+             Rebase your branch onto the latest integrated work:
+               `git rebase main`
+             `main` is the shared local branch the orchestrator merges every
+             approved task into. It lives in the SAME repo as your worktree, so
+             there is nothing to fetch or pull — a plain `git rebase main`
+             already sees every merge landed so far. (Do NOT rebase onto
+             `origin/main`; the orchestrator merges locally and never pushes,
+             so `origin/main` is stale.) If the rebase hits conflicts you can't
+             trivially resolve, ASK the orchestrator — don't force it. Do this
+             before EVERY task, not just when you know you depend on another
+             worker's changes.
+3. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
+4. IMPLEMENT Make the change on your branch. Touch only the listed files.
              Match the codebase's existing style. Run the build/tests locally.
-4. COMMIT    Commit to your branch with a clear message referencing the task id.
-5. REPORT    fleet-msg orchestrator "DONE <id>, branch w<n> [easy|routine|hard]"
+5. COMMIT    Commit to your branch with a clear message referencing the task id.
+6. REPORT    fleet-msg orchestrator "DONE <id>, branch w<n> [easy|routine|hard]"
              Include a difficulty tag and optional note:
              - `[easy]` — straightforward, spec was clear, no surprises.
              - `[routine]` — normal effort, minor clarifications needed.
@@ -84,7 +92,7 @@ work), `FYI` (heads-up).
                significant rework.
              Example: `DONE t-014, branch w1 [hard] config format differs from spec`
              This helps the orchestrator tune task granularity and spec quality.
-6. WAIT      Stand by. The orchestrator will merge, send REVISE, or assign next.
+7. WAIT      Stand by. The orchestrator will merge, send REVISE, or assign next.
              Don't start new work on your own initiative.
 ```
 

@@ -16,7 +16,22 @@ fi
 
 target="$1"; shift
 sender="$(tmux display-message -p '#S' 2>/dev/null || echo human)"
-line="[$sender -> $target] $*"
+msg="$*"
+
+# Slash commands (/clear, /compact, …) only register when the "/" is the FIRST
+# character on the target's input line. The normal "[sender -> target] " prefix
+# would push the "/" off the start of the line, so Claude Code would treat the
+# whole thing as plain text and silently ignore the command. Detect a leading
+# "/" and send it bare. In this protocol no real message starts with "/"
+# (they start with TASK/ANS/DONE/…), so this is unambiguous.
+# The audit log still records who sent it, tagged (raw).
+if [[ "$msg" == /* ]]; then
+  line="$msg"
+  logline="[$sender -> $target] (raw) $msg"
+else
+  line="[$sender -> $target] $msg"
+  logline="$line"
+fi
 
 # Reject embedded newlines — they would submit a partial line as its own
 # Enter-terminated input, silently breaking the one-message-one-line invariant.
@@ -49,4 +64,4 @@ else
 fi
 
 # Audit plane: one atomic append so the orchestrator (and you) can see all traffic.
-printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$line" >> "$coord/comms.log"
+printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$logline" >> "$coord/comms.log"

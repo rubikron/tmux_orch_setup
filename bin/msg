@@ -34,14 +34,16 @@ mkdir -p "$coord"
 # Wrap in flock so concurrent senders to the same target don't mangle each
 # other's lines — the send is two tmux commands and must be atomic.
 lockfile="$coord/.lock.$target"
-exec {lock_fd}>"$lockfile" 2>/dev/null || true
+# Use a fixed fd (9), not bash 4.1+ `{var}>`-style auto-allocation — macOS ships
+# bash 3.2, which parses `{lock_fd}` as a literal command and dies with exit 127.
+exec 9>"$lockfile" 2>/dev/null || true
 
-if [[ -n "${lock_fd:-}" ]] && flock -w 2 "$lock_fd" 2>/dev/null; then
+if flock -w 2 9 2>/dev/null; then
   tmux send-keys -t "$target" -l "$line"
   tmux send-keys -t "$target" Enter
-  flock -u "$lock_fd" 2>/dev/null || true
+  flock -u 9 2>/dev/null || true
 else
-  # Graceful degradation: if flock isn't available, send without locking
+  # Graceful degradation: flock is absent on stock macOS — send without locking.
   tmux send-keys -t "$target" -l "$line"
   tmux send-keys -t "$target" Enter
 fi

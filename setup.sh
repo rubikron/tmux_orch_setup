@@ -8,7 +8,7 @@
 #   A .env.example is provided — copy to .env.local and fill in your key.
 #
 # What it does:
-#   1. Creates a coordination dir ($FLEET_DIR) with BOARD.md, tasks/, comms.log, bin/msg
+#   1. Creates a coordination dir ($FLEET_DIR) with board.json, tasks/, comms.log, bin/msg
 #   2. Creates 4 git worktrees (branches w1/w2/w3/w4) for the workers
 #   3. Starts 5 tmux sessions and launches Claude Code in each
 #        - orchestrator: Opus (your normal Claude Code auth), on `main`
@@ -54,8 +54,10 @@ cp "$HERE/bin/learn" "$FLEET_DIR/bin/learn"
 cp "$HERE/bin/claim" "$FLEET_DIR/bin/claim"
 cp "$HERE/bin/submit" "$FLEET_DIR/bin/submit"
 cp "$HERE/bin/land" "$FLEET_DIR/bin/land"
+cp "$HERE/bin/board" "$FLEET_DIR/bin/board"
 chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn" \
-         "$FLEET_DIR/bin/claim" "$FLEET_DIR/bin/submit" "$FLEET_DIR/bin/land"
+         "$FLEET_DIR/bin/claim" "$FLEET_DIR/bin/submit" "$FLEET_DIR/bin/land" \
+         "$FLEET_DIR/bin/board"
 
 # ---- global CLI install ----------------------------------------------------
 # Why: the tmux panes add $FLEET_DIR/bin to PATH, so the tools resolve when a
@@ -77,6 +79,7 @@ ln -sf "$HERE/bin/claim"  "$LOCAL_BIN/fleet-release"
 ln -sf "$HERE/bin/claim"  "$LOCAL_BIN/fleet-claims"
 ln -sf "$HERE/bin/submit" "$LOCAL_BIN/fleet-submit"
 ln -sf "$HERE/bin/land"   "$LOCAL_BIN/fleet-land"
+ln -sf "$HERE/bin/board"  "$LOCAL_BIN/fleet-board"
 case ":$PATH:" in
   *":$LOCAL_BIN:"*) : ;;  # already on PATH — good
   *) echo "warning: $LOCAL_BIN is not on your PATH. Add it (e.g. in ~/.zshrc:" \
@@ -88,12 +91,14 @@ touch "$FLEET_DIR/comms.log"
 if [[ ! -f "$FLEET_DIR/metrics.jsonl" ]]; then
   touch "$FLEET_DIR/metrics.jsonl"
 fi
-if [[ ! -f "$FLEET_DIR/BOARD.md" ]]; then
-  cat > "$FLEET_DIR/BOARD.md" <<'EOF'
-# Task Board  (owned by the orchestrator)
-# id     state    assignee  notes
-# ------ -------- --------- -----------------------------
-EOF
+# Task board is JSON now (queried via fleet-board), so the orchestrator reads
+# one task or a filtered slice instead of a growing markdown table.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "warning: jq not found — fleet-board (the task board) needs it." \
+       "Install with 'brew install jq'." >&2
+fi
+if [[ ! -f "$FLEET_DIR/board.json" ]]; then
+  printf '{"tasks":[],"reflections":[]}\n' > "$FLEET_DIR/board.json"
 fi
 # ---- environment manifest (so the orchestrator doesn't waste tool calls) -----
 # Dump everything the orchestrator would probe with bash into one file.

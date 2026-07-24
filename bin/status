@@ -6,7 +6,7 @@
 #   FLEET_DIR=/path/to/.fleet bin/status
 #
 # Read-only — safe to run anytime, even while the fleet is active.
-# Uses tmux list-sessions, BOARD.md, comms.log, and metrics.jsonl.
+# Uses tmux list-sessions, board.json, comms.log, and metrics.jsonl.
 set -euo pipefail
 
 # ---- resolve coordination dir -----------------------------------------------
@@ -46,16 +46,19 @@ for s in "${SESSION_NAMES[@]}"; do
   fi
 done
 
-# ---- task board --------------------------------------------------------------
-board="$FLEET_DIR/BOARD.md"
-if [[ -f "$board" ]]; then
-  total=$(grep -cE '^\|' "$board" 2>/dev/null || true)
-  merged=$(grep -cE 'MERGED' "$board" 2>/dev/null || true)
-  active=$(grep -cE 'ACTIVE' "$board" 2>/dev/null || true)
-  blocked=$(grep -cE 'BLOCKED' "$board" 2>/dev/null || true)
-  queued=$(grep -cE 'QUEUED' "$board" 2>/dev/null || true)
-else
-  total=0; merged=0; active=0; blocked=0; queued=0
+# ---- task board (board.json, counted via jq) --------------------------------
+board="$FLEET_DIR/board.json"
+total=0; merged=0; active=0; blocked=0; queued=0
+if [[ -f "$board" ]] && command -v jq >/dev/null 2>&1; then
+  read -r total merged active blocked queued < <(jq -r '
+    [.tasks[].state] as $s
+    | [ ($s|length),
+        ($s|map(select(.=="MERGED"))|length),
+        ($s|map(select(.=="ACTIVE"))|length),
+        ($s|map(select(.=="BLOCKED"))|length),
+        ($s|map(select(.=="QUEUED"))|length) ] | @tsv' "$board" 2>/dev/null)
+  total=${total:-0}; merged=${merged:-0}; active=${active:-0}
+  blocked=${blocked:-0}; queued=${queued:-0}
 fi
 
 # ---- messages ----------------------------------------------------------------

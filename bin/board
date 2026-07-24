@@ -47,12 +47,23 @@ BOARD="$FLEET_DIR/board.json"
 
 now()  { date '+%Y-%m-%dT%H:%M:%S'; }
 
-# Open fd 9 (persists for the shell) but scope the error-silencing to the brace
-# group — a bare `exec 9>file 2>/dev/null` would redirect stderr permanently.
-# flock is best-effort: stock macOS lacks it, so degrade gracefully.
+# Serialize writers with an atomic mkdir lock. flock is absent on stock macOS,
+# so we don't depend on it — mkdir is atomic on any POSIX filesystem. Waits up
+# to ~5s, then assumes the holder died and breaks in (board writes take ms, so a
+# lock older than that is stale). Released on exit via trap.
+LOCKDIR="$FLEET_DIR/.lock.board.d"
 lock() {
-  { exec 9>"$FLEET_DIR/.lock.board"; } 2>/dev/null || true
-  flock -w 5 9 2>/dev/null || true
+  local i=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    i=$((i + 1))
+    if [[ $i -ge 100 ]]; then          # ~5s of 0.05s waits — treat as stale
+      rmdir "$LOCKDIR" 2>/dev/null || true
+      mkdir "$LOCKDIR" 2>/dev/null || true
+      break
+    fi
+    sleep 0.05
+  done
+  trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
 }
 
 # Atomically replace board.json with stdin (the jq-transformed document), but

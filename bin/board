@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# board — the fleet task board, stored as JSON so the orchestrator queries just
+# the slice it needs instead of reading a growing markdown table into context.
+#
+# State lives in $FLEET_DIR/board.json:
+#   { "tasks": [ {id,state,assignee,files,deps,revises,notes,created,updated} ],
+#     "reflections": [ "..." ] }
+#
+# Usage (installed on PATH as `fleet-board`):
+#   fleet-board get <id>                     one task as JSON (exit 4 if missing)
+#   fleet-board list [--state S] [--assignee W] [--all] [--json]
+#                                            active work only by default (MERGED
+#                                            hidden unless --all); compact table
+#   fleet-board add <id> [--state S] [--assignee W] [--files a,b]
+#                        [--deps x,y] [--notes "..."]
+#   fleet-board set <id> <field> <value>     field: state|assignee|notes|files|deps
+#   fleet-board bump <id>                    revises += 1
+#   fleet-board rm  <id>
+#   fleet-board next                         QUEUED tasks whose deps are all MERGED
+#   fleet-board reflect <text...>            append a retro note
+#
+# Every write rewrites the whole document atomically under a lock — never an
+# in-place mutation — so concurrent callers can't corrupt it.
+set -euo pipefail
+
+# ---- resolve coordination dir -----------------------------------------------
+FLEET_DIR="${FLEET_DIR:-}"
+if [[ -z "$FLEET_DIR" ]]; then
+  dir="$(pwd)"
+  while [[ "$dir" != "/" ]]; do
+    [[ -d "$dir/.fleet" ]] && { FLEET_DIR="$dir/.fleet"; break; }
+    dir="$(dirname "$dir")"
+  done
+fi
+if [[ -z "$FLEET_DIR" || ! -d "$FLEET_DIR" ]]; then
+  echo "fleet-board: no .fleet/ coordination dir found — is the fleet running?" >&2
+  exit 1
+fi
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "fleet-board: jq is required but not on PATH. Install it (brew install jq)." >&2
+  exit 1
+fi
+
+BOARD="$FLEET_DIR/board.json"
+[[ -f "$BOARD" ]] || printf '{"tasks":[],"reflections":[]}\n' > "$BOARD"
+
+now()  { date '+%Y-%m-%dT%H:%M:%S'; }
+
+# Serialize writers with an atomic mkdir lock. flock is absent on stock macOS,
+# so we don't depend on it — mkdir is atomic on any POSIX filesystem. Waits up
+# to ~5s, then assumes the holder died and breaks in (board writes take ms, so a
+# lock older than that is stale). Released on exit via trap.
+LOCKDIR="$FLEET_DIR/.lock.board.d"
+lock() {
+  local i=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    i=$((i + 1))
+    if [[ $i -ge 100 ]]; then          # ~5s of 0.05s waits — treat as stale
+      rmdir "$LOCKDIR" 2>/dev/null || true
+      mkdir "$LOCKDIR" 2>/dev/null || true
+      break
+    fi
+    sleep 0.05
+  done
+  trap 'rmdir "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
+}
+
+# Atomically replace board.json with stdin (the jq-transformed document), but
+# ONLY if it is valid JSON — never let a failed transform truncate the board.
+commit() {
+  local tmp="$BOARD.tmp.$$"
+  cat > "$tmp"
+  if jq -e . "$tmp" >/dev/null 2>&1; then
+    mv -f "$tmp" "$BOARD"
+  else
+    rm -f "$tmp"
+    echo "fleet-board: refusing to write invalid/empty board (change dropped)" >&2
+    return 1
+  fi
+}
+
+# comma-separated string -> JSON array. Empty input must still yield [] (jq -R
+# on empty stdin emits nothing, which would break --argjson).
+csv_json() {
+  if [[ -z "${1:-}" ]]; then printf '[]'
+  else printf '%s' "$1" | jq -Rc 'split(",") | map(select(length>0))'; fi
+}
+
+exists() { jq -e --arg id "$1" 'any(.tasks[]; .id==$id)' "$BOARD" >/dev/null 2>&1; }
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  get)
+    id="${1:?usage: fleet-board get <id>}"
+    exists "$id" || { echo "fleet-board: no such task: $id" >&2; exit 4; }
+    jq --arg id "$id" '.tasks[] | select(.id==$id)' "$BOARD"
+    ;;
+
+  list)
+    state=""; assignee=""; all=0; asjson=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --state)    state="${2:-}"; shift 2 ;;
+        --assignee) assignee="${2:-}"; shift 2 ;;
+        --all)      all=1; shift ;;
+        --json)     asjson=1; shift ;;
+        *) echo "fleet-board list: unknown arg: $1" >&2; exit 2 ;;
+      esac
+    done
+    # Filter: hide MERGED unless --all; apply optional state/assignee filters.
+    filter='[.tasks[]
+      | select($all==1 or .state!="MERGED")
+      | select($st=="" or .state==$st)
+      | select($as=="" or .assignee==$as)]'
+    if [[ "$asjson" == 1 ]]; then
+      jq --argjson all "$all" --arg st "$state" --arg as "$assignee" "$filter" "$BOARD"
+    else
+      jq -r --argjson all "$all" --arg st "$state" --arg as "$assignee" \
+        "$filter"' | (.[] |
+          [ .id,
+            .state,
+            (.assignee // "-"),
+            ((.files // []) | join(",") | if .=="" then "-" else . end),
+            (.notes // "" | if .=="" then "" else "· "+. end)
+          ] | @tsv)' "$BOARD" \
+        | awk -F'\t' '{printf "%-8s %-8s %-9s %-28s %s\n",$1,$2,$3,$4,$5}'
+    fi
+    ;;
+
+  add)
+    id="${1:?usage: fleet-board add <id> [--state ...] [--assignee ...] [--files a,b] [--deps x,y] [--notes ...]}"; shift
+    exists "$id" && { echo "fleet-board: task already exists: $id (use set)" >&2; exit 3; }
+    state="QUEUED"; assignee=""; files=""; deps=""; notes=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --state)    state="${2:-}"; shift 2 ;;
+        --assignee) assignee="${2:-}"; shift 2 ;;
+        --files)    files="${2:-}"; shift 2 ;;
+        --deps)     deps="${2:-}"; shift 2 ;;
+        --notes)    notes="${2:-}"; shift 2 ;;
+        *) echo "fleet-board add: unknown arg: $1" >&2; exit 2 ;;
+      esac
+    done
+    lock
+    ts="$(now)"
+    jq --arg id "$id" --arg state "$state" --arg assignee "$assignee" \
+       --argjson files "$(csv_json "$files")" --argjson deps "$(csv_json "$deps")" \
+       --arg notes "$notes" --arg now "$ts" \
+       '.tasks += [{id:$id,state:$state,assignee:$assignee,files:$files,deps:$deps,revises:0,notes:$notes,created:$now,updated:$now}]' \
+       "$BOARD" | commit
+    echo "added $id ($state)"
+    ;;
+
+  set)
+    id="${1:?usage: fleet-board set <id> <field> <value>}"
+    field="${2:?usage: fleet-board set <id> <field> <value>}"
+    value="${3-}"
+    exists "$id" || { echo "fleet-board: no such task: $id" >&2; exit 4; }
+    lock
+    ts="$(now)"
+    case "$field" in
+      files|deps)
+        jq --arg id "$id" --arg f "$field" --argjson v "$(csv_json "$value")" --arg now "$ts" \
+           '(.tasks[] | select(.id==$id)) |= (.[$f]=$v | .updated=$now)' "$BOARD" | commit
+        ;;
+      state|assignee|notes)
+        jq --arg id "$id" --arg f "$field" --arg v "$value" --arg now "$ts" \
+           '(.tasks[] | select(.id==$id)) |= (.[$f]=$v | .updated=$now)' "$BOARD" | commit
+        ;;
+      *) echo "fleet-board set: field must be state|assignee|notes|files|deps" >&2; exit 2 ;;
+    esac
+    echo "$id.$field = $value"
+    ;;
+
+  bump)
+    id="${1:?usage: fleet-board bump <id>}"
+    exists "$id" || { echo "fleet-board: no such task: $id" >&2; exit 4; }
+    lock
+    ts="$(now)"
+    jq --arg id "$id" --arg now "$ts" \
+       '(.tasks[] | select(.id==$id)) |= (.revises=((.revises//0)+1) | .updated=$now)' "$BOARD" | commit
+    jq -r --arg id "$id" '.tasks[] | select(.id==$id) | "\(.id) revises=\(.revises)"' "$BOARD"
+    ;;
+
+  rm)
+    id="${1:?usage: fleet-board rm <id>}"
+    exists "$id" || { echo "fleet-board: no such task: $id" >&2; exit 4; }
+    lock
+    jq --arg id "$id" '.tasks |= map(select(.id!=$id))' "$BOARD" | commit
+    echo "removed $id"
+    ;;
+
+  next)
+    # QUEUED tasks whose every dep is a MERGED task — safe to promote now.
+    jq -r '
+      (.tasks | map(select(.state=="MERGED") | .id)) as $done
+      | .tasks[]
+      | select(.state=="QUEUED")
+      | select((.deps // []) - $done | length == 0)
+      | "\(.id)\t\((.assignee // "-"))\t\((.notes // ""))"' "$BOARD" \
+      | awk -F'\t' 'NR==1{print "READY TO PROMOTE:"} {printf "  %-8s %-9s %s\n",$1,$2,$3} END{if(NR==0)print "  (none ready)"}'
+    ;;
+
+  reflect)
+    [[ $# -gt 0 ]] || { echo "usage: fleet-board reflect <text...>" >&2; exit 2; }
+    lock
+    jq --arg note "$(now)  $*" '.reflections += [$note]' "$BOARD" | commit
+    echo "noted"
+    ;;
+
+  ""|-h|--help|help)
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+
+  *)
+    echo "fleet-board: unknown command: $cmd (try: get|list|add|set|bump|rm|next|reflect)" >&2
+    exit 2
+    ;;
+esac

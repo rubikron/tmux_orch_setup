@@ -5,7 +5,7 @@
 #   bin/learn [--json]             # auto-detect FLEET_DIR
 #   FLEET_DIR=/path/to/.fleet bin/learn
 #
-# Reads metrics.jsonl, comms.log, and BOARD.md to produce a structured
+# Reads metrics.jsonl, comms.log, and board.json to produce a structured
 # analysis of the fleet run. Appends findings to .fleet/learnings.md
 # and prints a summary to stdout.
 #
@@ -38,7 +38,7 @@ fi
 
 metrics="$FLEET_DIR/metrics.jsonl"
 comms="$FLEET_DIR/comms.log"
-board="$FLEET_DIR/BOARD.md"
+board="$FLEET_DIR/board.json"
 learnings="$FLEET_DIR/learnings.md"
 
 # ---- helpers -----------------------------------------------------------------
@@ -95,11 +95,12 @@ else
   revise_msgs=0; blocked_msgs=0; first_ts=""; last_ts=""
 fi
 
-# ---- parse BOARD.md ---------------------------------------------------------
+# ---- pull the orchestrator's reflections from board.json --------------------
 board_section=""
-if [[ -f "$board" ]]; then
-  if grep -q '## Reflections' "$board" 2>/dev/null; then
-    board_section=$(sed -n '/## Reflections/,$ p' "$board" 2>/dev/null || echo "")
+if [[ -f "$board" ]] && command -v jq >/dev/null 2>&1; then
+  reflections=$(jq -r '(.reflections // []) | .[]' "$board" 2>/dev/null || echo "")
+  if [[ -n "$reflections" ]]; then
+    board_section=$(printf '## Reflections\n%s\n' "$reflections")
   fi
 fi
 

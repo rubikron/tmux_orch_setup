@@ -25,7 +25,8 @@ done
 # Only unlink real symlinks (never a file someone else put there); the fleet's
 # session names are fixed, so one fleet runs per machine and this is safe.
 LOCAL_BIN="$HOME/.local/bin"
-for t in fleet-msg fleet-status fleet-learn; do
+for t in fleet-msg fleet-status fleet-learn fleet-claim fleet-release \
+         fleet-claims fleet-submit fleet-land fleet-board; do
   f="$LOCAL_BIN/$t"
   [[ -L "$f" ]] && rm -f "$f" && echo "removed CLI symlink $f" || true
 done

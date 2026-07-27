@@ -237,9 +237,11 @@ Do not add new dependencies without asking.
                 CONTENTION (exit 3) means another active task owns those files —
                 serialize onto that worker or keep this task QUEUED. A clean
                 claim guarantees no other worker is handed the same file.
-                Do NOT sync the worker's worktree yourself — fleet-submit rebases
-                the worker's branch onto `main` at hand-off, so it always
-                integrates against the latest merged work.
+                Do NOT run git in a worker's worktree — not to sync, not for
+                anything. The worker rebases onto `main` at task start (WORKER.md
+                SYNC) AND fleet-submit rebases again at hand-off, so its branch is
+                always current without you. Pre-syncing a worktree wastes your
+                tokens and risks YOU resolving a conflict — never do it.
                 Write tasks/<id>.md, then clear context and send the task:
                   fleet-msg workerN "/clear"
                   fleet-msg workerN "TASK <id>: read <path>"

@@ -1,4 +1,4 @@
-<!-- version: 1.5.0 -->
+<!-- version: 1.6.0 -->
 # Worker Operating Manual (DeepSeek Implementer)
 
 You are one of three implementers on a small team. Your session name is your
@@ -66,12 +66,19 @@ work), `FYI` (heads-up).
 1. RECEIVE   The orchestrator sends `/clear` before each TASK, so you start
              with a fresh context — no stale history from prior tasks. A
              `TASK` message points to a spec. Read $FLEET_DIR/tasks/<id>.md fully.
-2. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
-3. IMPLEMENT Make the change on your branch. Touch ONLY the files the task
+2. SYNC      Before you write anything, put your branch on the latest merged
+             work — this is YOUR job, never the orchestrator's:
+               git rebase main
+             `main` is in the same repo as your worktree, so there's nothing to
+             fetch. If it conflicts and you can't trivially resolve, ASK the
+             orchestrator. (fleet-submit rebases again at hand-off; this
+             start-sync just keeps you from building on stale code.)
+3. CLARIFY   If anything is ambiguous, ASK the orchestrator before coding.
+4. IMPLEMENT Make the change on your branch. Touch ONLY the files the task
              names — the orchestrator has reserved them for you; editing others
              collides with another worker. Match the codebase's style. Commit
              with a message referencing the task id.
-4. SUBMIT    Hand off with ONE command — do NOT rebase or type DONE by hand:
+5. SUBMIT    Hand off with ONE command — do NOT rebase or type DONE by hand:
                fleet-submit <id> [easy|routine|hard] [note]
              It rebases your branch onto `main`, runs the tests, queues your
              branch for landing, and sends DONE for you. React to what it says:
@@ -82,7 +89,7 @@ work), `FYI` (heads-up).
              surprises · [routine] minor clarifications · [hard] ambiguous or
              needed rework. Example:
                fleet-submit t-014 hard "config format differs from spec"
-5. WAIT      Stand by. On `REVISE <id> [conflict|test-fail]`, read the `## Review`
+6. WAIT      Stand by. On `REVISE <id> [conflict|test-fail]`, read the `## Review`
              notes appended to the spec, fix, and run fleet-submit again. Don't
              start new work on your own initiative.
 ```

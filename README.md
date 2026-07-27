@@ -64,6 +64,17 @@ tmux attach -t worker3
 
 Tear down with `./teardown.sh /path/to/your/project` (keeps worker branches).
 
+**Permission mode:** every session — orchestrator included — launches in auto
+permission mode, so the fleet keeps moving while you're away instead of parking
+on approval prompts. Only run it on a repo you're happy to have edited
+unattended. To get per-action prompts back:
+
+```bash
+ORCHESTRATOR_PERMISSION_MODE=default ./setup.sh /path/to/your/project
+```
+
+`WORKER_PERMISSION_MODE` does the same for worker1-4.
+
 ## Kick it off
 
 Paste your goal into the **orchestrator** window. It will plan first (no coding),

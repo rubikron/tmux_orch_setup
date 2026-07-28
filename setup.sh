@@ -33,6 +33,14 @@ WORKER_MODEL="${WORKER_MODEL:-deepseek-v4-pro}"       # set to DeepSeek's curren
 DEEPSEEK_BASE="${DEEPSEEK_BASE:-https://api.deepseek.com/anthropic}"
 ORCHESTRATOR_MODEL="${ORCHESTRATOR_MODEL:-claude-opus-4-8}"
 UI_TESTER_MODEL="${UI_TESTER_MODEL:-claude-sonnet-5}"
+# Permission mode each session launches Claude Code with. Both default to auto:
+# workers run unattended in isolated worktrees, and the orchestrator drives the
+# fleet in a long loop that stalls on approval prompts when you step away.
+# Set either to "default" to get per-action approval prompts back, or to the
+# empty string to launch claude with no --permission-mode flag at all.
+# (No colon in the expansions below, so an explicit empty value is honoured.)
+ORCHESTRATOR_PERMISSION_MODE="${ORCHESTRATOR_PERMISSION_MODE-auto}"
+WORKER_PERMISSION_MODE="${WORKER_PERMISSION_MODE-auto}"
 # ---------------------------------------------------------------------------
 
 command -v tmux  >/dev/null || { echo "tmux not found"; exit 1; }
@@ -206,15 +214,18 @@ start_session () {
   for kv in "${extra_env[@]:-}"; do
     tmux send-keys -t "$name" "export $kv" Enter
   done
-  # Worker sessions run unattended in isolated worktrees, so they launch in auto
-  # permission mode — no manual approval per session. The orchestrator is driven
-  # interactively (you paste the goal into it), so it keeps prompts on.
-  local auto=""
-  if [[ "$name" == worker* ]]; then
-    auto=" --permission-mode auto"
+  # Permission mode per role (see config block at the top). Empty = launch claude
+  # with no --permission-mode flag, i.e. Claude Code's own default.
+  local mode="$WORKER_PERMISSION_MODE"
+  if [[ "$name" == "orchestrator" ]]; then
+    mode="$ORCHESTRATOR_PERMISSION_MODE"
+  fi
+  local perm_flag=""
+  if [[ -n "$mode" ]]; then
+    perm_flag=" --permission-mode $mode"
   fi
   tmux send-keys -t "$name" \
-    "claude$auto --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
+    "claude$perm_flag --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
 }
 
 # Orchestrator: Opus via real Anthropic auth. No DeepSeek env.
@@ -242,6 +253,7 @@ Fleet is up.
   worktrees        : $WT_ROOT/worker{1,2,3,4}   (branches w1/w2/w3/w4)
   workers 1-3 on   : $WORKER_MODEL
   worker4 on       : $UI_TESTER_MODEL  (UI testing specialist)
+  permission mode  : orchestrator=${ORCHESTRATOR_PERMISSION_MODE:-<claude default>}, workers=${WORKER_PERMISSION_MODE:-<claude default>}
   fleet commands   : fleet-msg / fleet-status / fleet-learn  (symlinked into $LOCAL_BIN)
 
 Open five terminal windows and attach one session in each:

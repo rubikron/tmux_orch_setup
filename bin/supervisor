@@ -192,22 +192,37 @@ class Agent:
         elif t == "rate_limit_event":
             self.state["last_event"] = "rate_limit"
 
-    def stop(self):
+    def signal_stop(self):
+        """Ask the agent to exit: close stdin (ends the session) + terminate.
+        Does NOT wait — call reap() afterwards so all agents stop concurrently
+        instead of serially (which would make teardown take N*timeout seconds)."""
         if self.proc is None:
             return
         try:
             if self.proc.stdin and not self.proc.stdin.closed:
-                self.proc.stdin.close()     # closing stdin ends the session
+                self.proc.stdin.close()
         except OSError:
             pass
         try:
             self.proc.terminate()
-            self.proc.wait(timeout=5)
+        except OSError:
+            pass
+
+    def reap(self, deadline):
+        """Wait (until the shared `deadline`) for the agent to exit, else kill it."""
+        if self.proc is None:
+            return
+        try:
+            self.proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except (OSError, subprocess.TimeoutExpired):
             try:
                 self.proc.kill()
             except OSError:
                 pass
+
+    def stop(self):
+        self.signal_stop()
+        self.reap(time.monotonic() + 5)
 
 
 def _summarize_assistant(ev):
@@ -247,14 +262,32 @@ class Supervisor:
         if self._stopping:
             return
         self._stopping = True
+        # Signal every agent first, then reap them against a single deadline, so
+        # shutdown is bounded (~5s total) instead of 5s * number-of-agents.
         for agent in self.agents.values():
-            agent.stop()
+            agent.signal_stop()
+        deadline = time.monotonic() + 6
+        for agent in self.agents.values():
+            agent.reap(deadline)
         self._write_live()
-        try:
-            os.remove(os.path.join(self.fleet_dir, "supervisor.json"))
-        except OSError:
-            pass
+        self._remove_supervisor_json()
         log(self.fleet_dir, "supervisor stopped")
+
+    def _remove_supervisor_json(self):
+        # Only remove supervisor.json if it is still OURS. A slow-exiting old
+        # supervisor must not delete the file a freshly-launched one just wrote
+        # (the teardown->setup handoff race).
+        path = os.path.join(self.fleet_dir, "supervisor.json")
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        if data.get("pid") == os.getpid():
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
     # -- message delivery (control plane) --
     def deliver(self, sender, target, text):

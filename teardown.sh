@@ -12,7 +12,17 @@ FLEET_DIR="$REPO/.fleet"
 if [[ -f "$FLEET_DIR/supervisor.json" ]] && command -v python3 >/dev/null 2>&1; then
   pid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pid",""))' "$FLEET_DIR/supervisor.json" 2>/dev/null || true)"
   if [[ -n "$pid" ]]; then
-    kill "$pid" 2>/dev/null && echo "stopped supervisor (pid $pid)" || true
+    kill "$pid" 2>/dev/null && echo "stopping supervisor (pid $pid)..." || true
+    # Wait for it to fully exit — its shutdown reaps the agent processes and
+    # removes supervisor.json. Returning early would race a subsequent setup.sh
+    # (the old supervisor could delete the new one's supervisor.json).
+    for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+      echo "force-killed supervisor (pid $pid)"
+    else
+      echo "supervisor stopped (pid $pid)"
+    fi
   fi
 fi
 

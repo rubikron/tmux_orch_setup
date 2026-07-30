@@ -1603,6 +1603,17 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(body), "application/json")
 
 
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Swallow the client-disconnect exceptions that are normal here — browsers
+    and (especially) EventSource reset keep-alive/SSE connections constantly, and
+    the default handler dumps a full traceback for each. Real errors still print."""
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Live library-floor dashboard for the Claude Code Fleet.")
     ap.add_argument("--port", type=int, default=int(os.environ.get("FLEET_DASHBOARD_PORT", "7373")))
@@ -1616,7 +1627,7 @@ def main():
         sys.exit(1)
 
     Handler.fleet_dir = fleet_dir
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    srv = QuietThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
     print(f"fleet dashboard — reading {fleet_dir}")
     print(f"  open {url}  (Ctrl-C to stop)")

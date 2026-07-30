@@ -604,7 +604,7 @@ PAGE = r"""<!doctype html>
   .chat-toggle[aria-expanded="true"]{background:var(--accent-dim);border-color:rgba(91,140,255,.4);color:var(--text)}
 
   .chat-panel{
-    position:fixed;top:60px;right:0;bottom:0;width:min(400px,92vw);
+    position:fixed;top:60px;right:0;bottom:0;width:60vw;
     background:var(--panel);border-left:1px solid var(--border-strong);
     display:flex;flex-direction:column;z-index:50;
     transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);

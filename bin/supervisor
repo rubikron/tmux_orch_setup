@@ -101,6 +101,7 @@ class Agent:
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--verbose",
+            "--include-partial-messages",
         ]
         if self.permission_mode:
             cmd += ["--permission-mode", self.permission_mode]

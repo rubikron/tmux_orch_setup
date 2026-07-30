@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -304,6 +305,34 @@ def parse_chat_events(path, since=0):
             })
         # system/init, rate_limit_event, stderr, and anything else: skip silently
     return out, total
+
+
+# SSE tail poll interval: fast enough to feel like real-time token streaming,
+# slow enough not to peg a CPU core across a handful of open chat panels.
+CHAT_STREAM_POLL_SECONDS = 0.12
+CHAT_STREAM_KEEPALIVE_SECONDS = 15
+
+
+def _line_offset(path, n):
+    """Byte offset in `path` immediately after its n-th line (n lines fully
+    consumed), or None if the file doesn't exist yet or has fewer than n
+    lines. n<=0 => offset 0 (start of file)."""
+    if n <= 0:
+        return 0
+    if not os.path.isfile(path):
+        return None
+    offset = 0
+    count = 0
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                offset += len(raw)
+                count += 1
+                if count >= n:
+                    return offset
+    except OSError:
+        return None
+    return None
 
 
 def build_state(fleet_dir):
@@ -614,9 +643,39 @@ PAGE = r"""<!doctype html>
     color:var(--text);border-bottom-left-radius:3px;
   }
   .chat-code{
-    display:block;margin:6px 0;padding:8px 10px;background:var(--bg);border:1px solid var(--border);
-    border-radius:6px;font-size:11.5px;line-height:1.5;overflow-x:auto;white-space:pre;color:#a9c2ff;
+    display:block;margin:0;padding:8px 10px;background:var(--bg);border:none;
+    border-radius:0;font-size:11.5px;line-height:1.5;overflow-x:auto;white-space:pre;color:#a9c2ff;
   }
+  .chat-code-wrap{margin:6px 0;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--bg)}
+  .chat-code-lang{font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--text-faint);
+    background:var(--panel-2);padding:3px 10px;border-bottom:1px solid var(--border)}
+
+  /* ---- markdown rendering (assistant replies only) ---- */
+  .chat-bubble.assistant{white-space:normal}
+  .chat-bubble.assistant.chat-streaming::after{
+    content:'\258C';display:inline-block;margin-left:1px;color:var(--accent);
+    animation:chat-blink 1s step-start infinite;
+  }
+  @keyframes chat-blink{50%{opacity:0}}
+  .chat-md-p{margin:0 0 8px;line-height:1.55}
+  .chat-md-p:last-child{margin-bottom:0}
+  .chat-md-h{margin:10px 0 6px;font-weight:700;color:var(--text);line-height:1.3}
+  .chat-md-h:first-child{margin-top:0}
+  h1.chat-md-h{font-size:16px} h2.chat-md-h{font-size:14.5px} h3.chat-md-h{font-size:13.5px}
+  h4.chat-md-h,h5.chat-md-h,h6.chat-md-h{font-size:11.5px;color:var(--text-dim);
+    text-transform:uppercase;letter-spacing:.5px}
+  .chat-md-strong{font-weight:700;color:var(--text)}
+  .chat-md-em{font-style:italic;color:var(--text)}
+  .chat-md-code{font-family:var(--font-mono);font-size:11.5px;background:var(--bg);
+    border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:#f5b26b}
+  .chat-md-list{margin:2px 0 8px;padding-left:20px}
+  .chat-md-list:last-child{margin-bottom:0}
+  .chat-md-list li{margin:2px 0;line-height:1.5}
+  .chat-md-quote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--border-strong);
+    color:var(--text-dim);font-style:italic}
+  .chat-md-quote:last-child{margin-bottom:0}
+  .chat-md-hr{border:none;border-top:1px solid var(--border);margin:10px 0}
+  .chat-md-link{color:var(--accent);text-decoration:underline;text-decoration-color:rgba(91,140,255,.4)}
   .chat-tool-row{
     align-self:flex-start;max-width:94%;display:flex;align-items:center;gap:7px;
     font-size:11px;color:var(--text-faint);padding:1px 2px;
@@ -1039,17 +1098,22 @@ for (const name of Object.keys(LAYOUT)){
   chatAgentSel.appendChild(opt);
 }
 let chatAgent = chatAgentSel.value = 'orchestrator';
-let chatSince = 0;
 let chatOpen = false;
-let chatPollTimer = null;
 let chatScrolledUp = false;
+// cursor into events/<agent>.jsonl, in LINES — shared between the one-shot
+// backfill (/api/chat) and the SSE tail (/api/chat/stream?since=), since both
+// endpoints count file lines identically.
+let streamCursor = 0;
+let chatES = null;          // the live EventSource, if any
+let chatStreamGen = 0;      // bumped on every (re)connect/teardown to invalidate stale timers/callbacks
+let activeTurn = null;      // in-flight streamed turn: {blocks: {index: {...}}} | null
 
 function setChatOpen(open){
   chatOpen = open;
   chatPanel.classList.toggle('open', open);
   chatPanel.setAttribute('aria-hidden', open ? 'false' : 'true');
   chatToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-  if (open){ startChatPoll(); chatInput.focus(); } else { stopChatPoll(); }
+  if (open){ backfillChat(); chatInput.focus(); } else { closeChatStream(); }
 }
 chatToggle.addEventListener('click', ()=> setChatOpen(!chatOpen));
 chatClose.addEventListener('click', ()=> setChatOpen(false));
@@ -1058,22 +1122,14 @@ document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape' && chatOpen) 
 chatAgentSel.addEventListener('change', ()=>{
   chatAgent = chatAgentSel.value;
   chatInput.placeholder = `Message ${chatAgent}…`;
-  chatSince = 0;
+  streamCursor = 0;
   chatScrolledUp = false;
   chatTranscript.innerHTML = '<div class="chat-empty">No messages yet.</div>';
   showChatError('');
-  if (chatOpen) pollChat();
+  closeChatStream();
+  if (chatOpen) backfillChat();
 });
 chatInput.placeholder = `Message ${chatAgent}…`;
-
-function startChatPoll(){
-  stopChatPoll();
-  pollChat();
-  chatPollTimer = setInterval(pollChat, 1000);
-}
-function stopChatPoll(){
-  if (chatPollTimer){ clearInterval(chatPollTimer); chatPollTimer = null; }
-}
 
 function showChatError(msg){
   if (!msg){ chatErrorEl.hidden = true; chatErrorEl.textContent = ''; return; }
@@ -1081,42 +1137,240 @@ function showChatError(msg){
   chatErrorEl.textContent = msg;
 }
 
-async function pollChat(){
+// ---- backfill (finalized history) then live tail (token-by-token) ----
+async function backfillChat(){
   const agent = chatAgent; // guard against a race with an agent switch mid-flight
   try{
-    const r = await fetch(`/api/chat?agent=${encodeURIComponent(agent)}&since=${chatSince}`, {cache:'no-store'});
+    const r = await fetch(`/api/chat?agent=${encodeURIComponent(agent)}&since=0`, {cache:'no-store'});
     const data = await r.json().catch(()=>({}));
     if (agent !== chatAgent) return; // user switched away while this was in flight
     if (!r.ok){ showChatError(data.error || `chat request failed (${r.status})`); return; }
     showChatError(data.error || '');
     if (data.messages && data.messages.length) appendChatMessages(data.messages);
-    if (typeof data.total === 'number') chatSince = data.total;
+    streamCursor = typeof data.total === 'number' ? data.total : 0;
   } catch(e){
-    if (agent === chatAgent) showChatError('lost connection to dashboard server');
+    if (agent !== chatAgent) return;
+    showChatError('lost connection to dashboard server');
+    streamCursor = 0;
   }
+  if (agent === chatAgent && chatOpen) connectChatStream();
 }
 
-function renderRichText(text){
-  const parts = [];
-  const re = /```[a-zA-Z0-9_+-]*\n?([\s\S]*?)```/g;
-  let last = 0, m;
-  while ((m = re.exec(text||''))){
-    if (m.index > last) parts.push({code:false, v:text.slice(last, m.index)});
-    parts.push({code:true, v:m[1]});
-    last = re.lastIndex;
+function connectChatStream(){
+  closeChatStream();
+  const agent = chatAgent;
+  const gen = ++chatStreamGen;
+  const es = new EventSource(`/api/chat/stream?agent=${encodeURIComponent(agent)}&since=${streamCursor}`);
+  chatES = es;
+  es.onmessage = (e) => {
+    if (gen !== chatStreamGen) return;
+    streamCursor++;
+    let ev;
+    try { ev = JSON.parse(e.data); } catch(err){ return; }
+    handleStreamEvent(ev);
+  };
+  es.onerror = () => {
+    if (gen !== chatStreamGen) return;
+    es.close();
+    // auto-reconnect while the panel is still open on this agent
+    setTimeout(()=>{ if (gen === chatStreamGen && chatOpen) connectChatStream(); }, 1500);
+  };
+}
+function closeChatStream(){
+  chatStreamGen++; // invalidate any in-flight onmessage/reconnect callbacks
+  if (chatES){ chatES.close(); chatES = null; }
+  activeTurn = null;
+}
+
+// ---- raw claude stream-json event -> DOM (dedup'd against the consolidated events) ----
+function handleStreamEvent(ev){
+  if (!ev || typeof ev !== 'object') return;
+  if (ev.type === 'stream_event'){
+    const se = ev.event || {};
+    if (se.type === 'message_start') activeTurn = {blocks:{}};
+    else if (se.type === 'content_block_start') onBlockStart(se.index, se.content_block);
+    else if (se.type === 'content_block_delta') onBlockDelta(se.index, se.delta);
+    else if (se.type === 'content_block_stop') onBlockStop(se.index);
+    // message_delta / message_stop: no rendering action needed
+  } else if (ev.type === 'assistant'){
+    // Already streamed live via deltas above -> skip to avoid double-rendering.
+    // Only fall back to the consolidated event when no live turn was seen
+    // (e.g. this agent doesn't support --include-partial-messages, or we
+    // reconnected mid-turn and missed message_start).
+    if (!activeTurn) renderConsolidatedAssistant(ev);
+  } else if (ev.type === 'result'){
+    finalizeTurn(ev);
   }
-  if (last < (text||'').length) parts.push({code:false, v:text.slice(last)});
-  if (!parts.length) parts.push({code:false, v:''});
-  return parts.map(p => p.code
-    ? `<pre class="chat-code mono">${esc(p.v)}</pre>`
-    : esc(p.v)
-  ).join('');
+  // system/init, rate_limit_event, stderr, raw: ignore
+}
+
+function onBlockStart(index, block){
+  if (!activeTurn) activeTurn = {blocks:{}};
+  const kind = block && block.type;
+  if (kind === 'text'){
+    const el = document.createElement('div');
+    el.className = 'chat-bubble assistant chat-streaming';
+    appendChatNode(el);
+    activeTurn.blocks[index] = {kind:'text', el, raw:''};
+  } else if (kind === 'tool_use'){
+    const el = document.createElement('div');
+    el.className = 'chat-tool-row';
+    el.innerHTML = `<span class="chat-tool-dot"></span><span class="chat-tool-name mono">${esc(block.name||'tool')}</span>`+
+      `<span class="chat-tool-detail mono"></span>`;
+    appendChatNode(el);
+    activeTurn.blocks[index] = {kind:'tool', el, raw:''};
+  } else {
+    activeTurn.blocks[index] = {kind:'other'}; // e.g. thinking — not rendered
+  }
+}
+function onBlockDelta(index, delta){
+  const b = activeTurn && activeTurn.blocks[index];
+  if (!b || !delta) return;
+  if (delta.type === 'text_delta' && b.kind === 'text'){
+    b.raw += delta.text || '';
+    b.el.innerHTML = renderRichText(b.raw);
+    autoscrollChat();
+  } else if (delta.type === 'input_json_delta' && b.kind === 'tool'){
+    b.raw += delta.partial_json || '';
+    const detail = b.el.querySelector('.chat-tool-detail');
+    if (detail) detail.textContent = truncatePreview(b.raw);
+  }
+  // thinking_delta / signature_delta: not rendered
+}
+function onBlockStop(index){
+  const b = activeTurn && activeTurn.blocks[index];
+  if (!b) return;
+  if (b.kind === 'text'){
+    b.el.classList.remove('chat-streaming');
+  } else if (b.kind === 'tool'){
+    let preview;
+    try { preview = truncatePreview(JSON.stringify(JSON.parse(b.raw))); }
+    catch(e){ preview = truncatePreview(b.raw); }
+    const detail = b.el.querySelector('.chat-tool-detail');
+    if (detail){ detail.textContent = preview; detail.title = preview; }
+  }
+}
+function finalizeTurn(ev){
+  appendChatNode(chatResultDivider({
+    isError: !!ev.is_error,
+    cost: ev.total_cost_usd,
+    turns: ev.num_turns,
+  }));
+  activeTurn = null;
+}
+function renderConsolidatedAssistant(ev){
+  const content = (ev.message && ev.message.content) || [];
+  for (const block of content){
+    if (block.type === 'text' && block.text){
+      appendChatNode(chatBubble('assistant', block.text));
+    } else if (block.type === 'tool_use'){
+      appendChatNode(chatToolRow({text: block.name || 'tool', detail: truncatePreview(JSON.stringify(block.input||{}))}));
+    }
+  }
+}
+function truncatePreview(s, limit=90){
+  s = (s||'').replace(/\s+/g,' ').trim();
+  return s.length <= limit ? s : s.slice(0, limit-1) + '…';
+}
+
+// ---- markdown (assistant text only — user bubbles stay plain) ----
+function mdEscape(s){
+  return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+function mdInline(s){
+  s = s.replace(/`([^`\n]+)`/g, (_, code) => `<code class="chat-md-code mono">${code}</code>`);
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g,
+    (_, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer" class="chat-md-link">${t}</a>`);
+  s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong class="chat-md-strong">$1</strong>');
+  s = s.replace(/__([^_\n]+)__/g, '<strong class="chat-md-strong">$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em class="chat-md-em">$2</em>');
+  s = s.replace(/(^|[^_])_([^_\n]+)_(?!_)/g, '$1<em class="chat-md-em">$2</em>');
+  return s;
+}
+function mdCodeBlock(lang, code){
+  const body = code.replace(/\n$/, '');
+  const label = lang ? `<div class="chat-code-lang">${lang}</div>` : '';
+  return `<div class="chat-code-wrap">${label}<pre class="chat-code mono">${body}</pre></div>`;
+}
+function renderRichText(text){
+  // 1. escape HTML first — everything below operates on already-safe text.
+  let src = mdEscape(text || '');
+  // 2. pull out fenced code blocks so their contents are never touched by
+  //    inline/list/heading parsing, and guarantee each sits on its own line.
+  const codeBlocks = [];
+  src = src.replace(/```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push({lang, code});
+    return `@@CB${idx}@@`;
+  });
+  src = src.replace(/([^\n])(@@CB\d+@@)/g, '$1\n$2').replace(/(@@CB\d+@@)([^\n])/g, '$1\n$2');
+
+  const lines = src.split('\n');
+  let html = '';
+  let list = null; // {type:'ul'|'ol', items:''}
+  const closeList = () => { if (list){ html += `<${list.type} class="chat-md-list">${list.items}</${list.type}>`; list = null; } };
+
+  let i = 0;
+  while (i < lines.length){
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (trimmed === ''){ closeList(); i++; continue; }
+
+    const cb = trimmed.match(/^@@CB(\d+)@@$/);
+    if (cb){ closeList(); const b = codeBlocks[+cb[1]]; html += mdCodeBlock(b.lang, b.code); i++; continue; }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (heading){
+      closeList();
+      const level = heading[1].length;
+      html += `<h${level} class="chat-md-h">${mdInline(heading[2])}</h${level}>`;
+      i++; continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)){ closeList(); html += '<hr class="chat-md-hr">'; i++; continue; }
+
+    if (trimmed.startsWith('&gt;')){
+      closeList();
+      const quoted = [];
+      while (i < lines.length && lines[i].trim().startsWith('&gt;')){
+        quoted.push(mdInline(lines[i].trim().replace(/^&gt;\s?/, '')));
+        i++;
+      }
+      html += `<blockquote class="chat-md-quote">${quoted.join('<br>')}</blockquote>`;
+      continue;
+    }
+
+    const ol = trimmed.match(/^(\d+)\.\s+(.*)$/);
+    const ul = !ol && trimmed.match(/^[-*]\s+(.*)$/);
+    if (ol || ul){
+      const type = ol ? 'ol' : 'ul';
+      if (!list || list.type !== type){ closeList(); list = {type, items:''}; }
+      list.items += `<li>${mdInline(ol ? ol[2] : ul[1])}</li>`;
+      i++; continue;
+    }
+
+    closeList();
+    const para = [line];
+    i++;
+    while (i < lines.length){
+      const t = lines[i].trim();
+      if (t === '' || /^@@CB\d+@@$/.test(t) || /^#{1,6}\s+/.test(t) ||
+          /^(-{3,}|\*{3,}|_{3,})$/.test(t) || t.startsWith('&gt;') ||
+          /^\d+\.\s+/.test(t) || /^[-*]\s+/.test(t)) break;
+      para.push(lines[i]);
+      i++;
+    }
+    html += `<p class="chat-md-p">${para.map(l=>mdInline(l.trim())).join('<br>')}</p>`;
+  }
+  closeList();
+  return html || mdInline(src);
 }
 
 function chatBubble(role, text){
   const d = document.createElement('div');
   d.className = 'chat-bubble ' + role;
-  d.innerHTML = renderRichText(text);
+  d.innerHTML = role === 'assistant' ? renderRichText(text) : esc(text);
   return d;
 }
 function chatToolRow(m){
@@ -1138,21 +1392,23 @@ function chatResultDivider(m){
 }
 function chatNodesFor(m){
   if (m.kind === 'tool') return [chatToolRow(m)];
-  if (m.kind === 'result'){
-    const nodes = [];
-    if (m.text) nodes.push(chatBubble('assistant', m.text));
-    nodes.push(chatResultDivider(m));
-    return nodes;
-  }
+  // Fix: the result node renders ONLY the divider — the reply text was
+  // already rendered by the preceding assistant/text event in this same
+  // turn, so re-rendering it here would print every reply twice.
+  if (m.kind === 'result') return [chatResultDivider(m)];
   return [chatBubble(m.role === 'user' ? 'user' : 'assistant', m.text || '')];
 }
-function appendChatMessages(msgs){
+function appendChatNode(node){
   const empty = chatTranscript.querySelector('.chat-empty');
   if (empty) empty.remove();
-  const frag = document.createDocumentFragment();
-  for (const m of msgs) for (const n of chatNodesFor(m)) frag.appendChild(n);
-  chatTranscript.appendChild(frag);
+  chatTranscript.appendChild(node);
+  autoscrollChat();
+}
+function autoscrollChat(){
   if (!chatScrolledUp) chatTranscript.scrollTop = chatTranscript.scrollHeight;
+}
+function appendChatMessages(msgs){
+  for (const m of msgs) for (const n of chatNodesFor(m)) appendChatNode(n);
 }
 chatTranscript.addEventListener('scroll', ()=>{
   const gap = chatTranscript.scrollHeight - chatTranscript.scrollTop - chatTranscript.clientHeight;
@@ -1228,6 +1484,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps({"error": str(e)}), "application/json")
         elif path == "/api/chat":
             self._handle_chat_get(parse_qs(parsed.query))
+        elif path == "/api/chat/stream":
+            self._handle_chat_stream(parse_qs(parsed.query))
         elif path == "/" or path == "/index.html":
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif path == "/favicon.ico":
@@ -1259,6 +1517,67 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({"messages": messages, "total": total}), "application/json")
         except Exception as e:  # never let a parse hiccup kill the panel
             self._send(200, json.dumps({"messages": [], "total": since, "error": str(e)}), "application/json")
+
+    def _handle_chat_stream(self, query):
+        """SSE: tail events/<agent>.jsonl from line `since`, forwarding each
+        newly-appended raw JSON line to the browser as it arrives. The client
+        parses stream_event/assistant/result itself for live token typing."""
+        agent = (query.get("agent") or [""])[0]
+        if agent not in SESSIONS:
+            self._send(400, json.dumps({"error": "unknown agent"}), "application/json")
+            return
+        try:
+            since = max(0, int((query.get("since") or ["0"])[0]))
+        except ValueError:
+            since = 0
+
+        events_path = os.path.join(self.fleet_dir, "events", f"{agent}.jsonl")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        offset = _line_offset(events_path, since)
+        last_keepalive = time.monotonic()
+        try:
+            while True:
+                if offset is None:
+                    # file not created yet, or hasn't reached `since` lines yet
+                    offset = _line_offset(events_path, since)
+                wrote = False
+                if offset is not None and os.path.isfile(events_path):
+                    try:
+                        with open(events_path, "rb") as f:
+                            f.seek(offset)
+                            chunk = f.read()
+                    except OSError:
+                        chunk = b""
+                    if chunk:
+                        # only emit whole lines; leave a partial tail for next pass
+                        nl = chunk.rfind(b"\n")
+                        if nl != -1:
+                            complete, offset = chunk[: nl + 1], offset + nl + 1
+                            for raw in complete.split(b"\n"):
+                                line = raw.decode("utf-8", "replace").strip()
+                                if not line:
+                                    continue
+                                self.wfile.write(b"data: " + line.encode("utf-8") + b"\n\n")
+                                wrote = True
+                if wrote:
+                    self.wfile.flush()
+                    last_keepalive = time.monotonic()
+                else:
+                    now = time.monotonic()
+                    if now - last_keepalive > CHAT_STREAM_KEEPALIVE_SECONDS:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        last_keepalive = now
+                time.sleep(CHAT_STREAM_POLL_SECONDS)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return  # client disconnected — end the thread quietly
 
     def _handle_chat_post(self):
         length = int(self.headers.get("Content-Length") or 0)

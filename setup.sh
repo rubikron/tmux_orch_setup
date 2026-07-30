@@ -57,9 +57,26 @@ fi
 command -v git   >/dev/null || { echo "git not found"; exit 1; }
 : "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in your environment or .env file}"
 
+# Ensure the target directory exists and is a git repo — init one if it isn't.
+mkdir -p "$REPO"
 REPO="$(cd "$REPO" && pwd)"
-git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-  || { echo "$REPO is not a git repo"; exit 1; }
+if ! git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "→ $REPO is not a git repo — initializing one"
+  git -C "$REPO" init -q
+fi
+# git worktrees (created below for each worker) require at least one commit, so a
+# freshly-initialized repo needs a root commit before we can branch off HEAD.
+if ! git -C "$REPO" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+  [[ -e "$REPO/README.md" ]] || printf '# %s\n' "$(basename "$REPO")" > "$REPO/README.md"
+  git -C "$REPO" add -A
+  # Fall back to a placeholder identity only if the repo/global git has none,
+  # so we never override a configured user.
+  id_flags=()
+  [[ -z "$(git -C "$REPO" config user.name  || true)" ]] && id_flags+=(-c user.name=fleet-setup)
+  [[ -z "$(git -C "$REPO" config user.email || true)" ]] && id_flags+=(-c user.email=fleet-setup@localhost)
+  git -C "$REPO" ${id_flags[@]+"${id_flags[@]}"} commit -q -m "chore: initial commit (fleet setup)"
+  echo "→ created initial commit on $(git -C "$REPO" symbolic-ref --short HEAD)"
+fi
 
 # ---- coordination dir ------------------------------------------------------
 FLEET_DIR="$REPO/.fleet"

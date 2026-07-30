@@ -177,6 +177,18 @@ def load_topology(path):
     return modes
 
 
+def load_live(path):
+    """Supervisor liveness: {name: alive_bool}, or None if no live.json yet."""
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return {k: bool(v.get("alive")) for k, v in data.items()}
+
+
 def tmux_sessions():
     """Live tmux session names, or None if tmux is unavailable."""
     import subprocess
@@ -200,15 +212,21 @@ def build_state(fleet_dir):
     claims = load_claims(os.path.join(fleet_dir, "claims.tsv"))
     queue = load_merge_queue(os.path.join(fleet_dir, "merge-queue"))
     modes = load_topology(os.path.join(fleet_dir, "topology"))
-    live = tmux_sessions()
+    # Supervisor transport (default): liveness from live.json. tmux transport
+    # (legacy): liveness from `tmux list-sessions`. Detected by supervisor.json.
+    supervisor = os.path.isfile(os.path.join(fleet_dir, "supervisor.json"))
+    live_map = load_live(os.path.join(fleet_dir, "live.json"))
+    tmux_live = None if supervisor else tmux_sessions()
 
     # per-session liveness, respecting topology (native != down)
     sessions = []
     for name in SESSIONS:
         mode = modes.get(name, "tmux")
-        if live is None:
+        if live_map is not None:
+            status = "up" if live_map.get(name) else "down"
+        elif tmux_live is None:
             status = "unknown"
-        elif name in live:
+        elif name in tmux_live:
             status = "up"
         elif mode == "native":
             status = "native"

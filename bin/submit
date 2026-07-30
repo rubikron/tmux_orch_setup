@@ -32,7 +32,8 @@ note="$*"
 MAIN_BRANCH="main"; TEST_CMD=""
 [[ -f "$FLEET_DIR/fleet.conf" ]] && . "$FLEET_DIR/fleet.conf"
 
-worker="$(tmux display-message -p '#S' 2>/dev/null || echo worker)"
+# Identity: supervisor sets FLEET_AGENT; fall back to tmux session name (legacy).
+worker="${FLEET_AGENT:-$(tmux display-message -p '#S' 2>/dev/null || echo worker)}"
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
 
 # resolve the message tool (PATH symlink, else the copy setup drops in .fleet/bin)

@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+# supervisor — headless, tmux-free transport for the Claude Code Fleet.
+#
+# Spawns each agent as a persistent headless Claude Code process
+#   claude -p --input-format stream-json --output-format stream-json --verbose
+# holds its stdin/stdout pipes, and:
+#   - delivers a "user turn" by writing one stream-json line to the target's stdin
+#     (this replaces `tmux send-keys`);
+#   - parses each agent's stdout events into events/<agent>.jsonl and a live state;
+#   - writes comms.log (unchanged format) on every delivered message;
+#   - advertises a loopback control endpoint in supervisor.json;
+#   - heartbeats liveness into live.json for bin/status and bin/dashboard.
+#
+# One supervisor per repo. It addresses agents by name inside its own process, so
+# multiple fleets in multiple repos never collide (unlike global tmux names).
+#
+# Usage:
+#   FLEET_DIR=/repo/.fleet bin/supervisor            # reads $FLEET_DIR/agents.json
+#   bin/supervisor --agents /path/agents.json --fleet-dir /repo/.fleet
+#
+# agents.json:
+#   {"agents":[
+#     {"name":"orchestrator","cwd":"/repo","prompt_file":"/kit/prompts/ORCHESTRATOR.md",
+#      "permission_mode":"bypassPermissions",
+#      "env":{"ANTHROPIC_MODEL":"claude-opus-4-8"}},
+#     ...]}
+#
+# Pure Python stdlib. No build step, no dependencies.
+import argparse
+import json
+import os
+import secrets
+import signal
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ANTHROPIC_* the agent's own manifest env must be the sole source of truth for,
+# so a DeepSeek base URL from the launching shell can't leak into the Opus
+# orchestrator (mirrors setup.sh's explicit `unset`).
+ANTHROPIC_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL")
+HEARTBEAT_SECONDS = 3
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
+
+
+def now_iso():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def log(fleet_dir, msg):
+    """Append one line to the supervisor's own log. Best-effort."""
+    try:
+        with open(os.path.join(fleet_dir, "supervisor.log"), "a") as f:
+            f.write(f"{now_iso()} {msg}\n")
+    except OSError:
+        pass
+
+
+# ---- one managed agent ------------------------------------------------------
+class Agent:
+    def __init__(self, spec, fleet_dir, fleet_bin):
+        self.name = spec["name"]
+        self.cwd = spec.get("cwd") or fleet_dir
+        self.prompt_file = spec.get("prompt_file")
+        self.permission_mode = spec.get("permission_mode", DEFAULT_PERMISSION_MODE)
+        self.spec_env = spec.get("env", {}) or {}
+        self.fleet_dir = fleet_dir
+        self.fleet_bin = fleet_bin
+        self.proc = None
+        self.lock = threading.Lock()          # serialize stdin writes
+        self.events_path = os.path.join(fleet_dir, "events", f"{self.name}.jsonl")
+        # live state, mutated by the reader thread, read by the HTTP/heartbeat threads
+        self.state = {
+            "name": self.name,
+            "pid": None,
+            "alive": False,
+            "idle": True,
+            "last_activity": None,
+            "session_id": None,
+            "turns": 0,
+            "cost": 0.0,
+            "last_event": "",
+        }
+
+    def build_env(self):
+        # Clean inherited ANTHROPIC_* so each agent's model/auth comes ONLY from
+        # its manifest. Then layer FLEET_* and the agent's own env on top.
+        env = {k: v for k, v in os.environ.items() if k not in ANTHROPIC_KEYS}
+        env["FLEET_DIR"] = self.fleet_dir
+        env["FLEET_AGENT"] = self.name
+        env["PATH"] = self.fleet_bin + os.pathsep + env.get("PATH", "")
+        for k, v in self.spec_env.items():
+            env[k] = str(v)
+        return env
+
+    def build_cmd(self):
+        cmd = [
+            "claude", "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+        ]
+        if self.permission_mode:
+            cmd += ["--permission-mode", self.permission_mode]
+        if self.prompt_file and os.path.isfile(self.prompt_file):
+            with open(self.prompt_file) as f:
+                cmd += ["--append-system-prompt", f.read()]
+        return cmd
+
+    def start(self):
+        os.makedirs(os.path.dirname(self.events_path), exist_ok=True)
+        self.proc = subprocess.Popen(
+            self.build_cmd(),
+            cwd=self.cwd,
+            env=self.build_env(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self.state["pid"] = self.proc.pid
+        self.state["alive"] = True
+        self.state["last_activity"] = now_iso()
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
+
+    def is_alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def deliver(self, content):
+        """Write one stream-json user turn to the agent's stdin. Raises on failure."""
+        if not self.is_alive():
+            raise RuntimeError(f"agent {self.name} is not alive")
+        payload = {"type": "user", "message": {"role": "user", "content": content}}
+        line = json.dumps(payload) + "\n"
+        with self.lock:
+            self.proc.stdin.write(line)
+            self.proc.stdin.flush()
+        self.state["idle"] = False
+        self.state["last_activity"] = now_iso()
+
+    def _append_event(self, obj):
+        try:
+            with open(self.events_path, "a") as f:
+                f.write(json.dumps(obj) + "\n")
+        except OSError:
+            pass
+
+    def _read_stdout(self):
+        for raw in self.proc.stdout:
+            raw = raw.rstrip("\n")
+            if not raw:
+                continue
+            try:
+                ev = json.loads(raw)
+            except ValueError:
+                self._append_event({"type": "raw", "ts": now_iso(), "line": raw})
+                continue
+            self._append_event(ev)
+            self._absorb(ev)
+        # stdout closed => process exited
+        self.state["alive"] = False
+        self.state["idle"] = True
+        log(self.fleet_dir, f"agent {self.name} stdout closed (exited)")
+
+    def _read_stderr(self):
+        for raw in self.proc.stderr:
+            raw = raw.rstrip("\n")
+            if raw:
+                self._append_event({"type": "stderr", "ts": now_iso(), "line": raw})
+
+    def _absorb(self, ev):
+        """Update live state from one stdout event."""
+        t = ev.get("type")
+        self.state["last_activity"] = now_iso()
+        if t == "system" and ev.get("subtype") == "init":
+            self.state["session_id"] = ev.get("session_id")
+        elif t == "assistant":
+            self.state["idle"] = False
+            self.state["last_event"] = _summarize_assistant(ev)
+        elif t == "result":
+            self.state["idle"] = True
+            self.state["turns"] += 1
+            cost = ev.get("total_cost_usd")
+            if isinstance(cost, (int, float)):
+                self.state["cost"] = round(self.state["cost"] + cost, 6)
+            self.state["last_event"] = "result: " + str(ev.get("result", ""))[:120]
+        elif t == "rate_limit_event":
+            self.state["last_event"] = "rate_limit"
+
+    def stop(self):
+        if self.proc is None:
+            return
+        try:
+            if self.proc.stdin and not self.proc.stdin.closed:
+                self.proc.stdin.close()     # closing stdin ends the session
+        except OSError:
+            pass
+        try:
+            self.proc.terminate()
+            self.proc.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+
+
+def _summarize_assistant(ev):
+    """Short human label for an assistant event (text preview or tool name)."""
+    content = ev.get("message", {}).get("content", [])
+    for block in content:
+        if block.get("type") == "tool_use":
+            return "tool: " + str(block.get("name", "?"))
+    for block in content:
+        if block.get("type") == "text":
+            return "text: " + str(block.get("text", ""))[:120]
+    return "assistant"
+
+
+# ---- the supervisor ---------------------------------------------------------
+class Supervisor:
+    def __init__(self, fleet_dir, agents_spec):
+        self.fleet_dir = fleet_dir
+        self.fleet_bin = os.path.join(fleet_dir, "bin")
+        self.token = secrets.token_hex(16)
+        self.agents = {}
+        for spec in agents_spec:
+            self.agents[spec["name"]] = Agent(spec, fleet_dir, self.fleet_bin)
+        self._stopping = False
+
+    # -- lifecycle --
+    def start(self):
+        for agent in self.agents.values():
+            try:
+                agent.start()
+                log(self.fleet_dir, f"started agent {agent.name} pid={agent.state['pid']}")
+            except OSError as e:
+                log(self.fleet_dir, f"FAILED to start {agent.name}: {e}")
+        self._write_topology()
+
+    def stop(self):
+        if self._stopping:
+            return
+        self._stopping = True
+        for agent in self.agents.values():
+            agent.stop()
+        self._write_live()
+        try:
+            os.remove(os.path.join(self.fleet_dir, "supervisor.json"))
+        except OSError:
+            pass
+        log(self.fleet_dir, "supervisor stopped")
+
+    # -- message delivery (control plane) --
+    def deliver(self, sender, target, text):
+        agent = self.agents.get(target)
+        if agent is None:
+            raise KeyError(f"unknown agent: {target}")
+        # Slash commands must be the first char on the line to register, so send
+        # them bare (no "[sender -> target]" prefix), mirroring the tmux transport.
+        if text.startswith("/"):
+            content = text
+            logline = f"[{sender} -> {target}] (raw) {text}"
+        else:
+            content = f"[{sender} -> {target}] {text}"
+            logline = content
+        agent.deliver(content)
+        self._append_comms(logline)
+
+    def _append_comms(self, logline):
+        try:
+            with open(os.path.join(self.fleet_dir, "comms.log"), "a") as f:
+                f.write(f"{now_iso()} {logline}\n")
+        except OSError:
+            pass
+
+    # -- state files (monitoring plane) --
+    def _write_topology(self):
+        try:
+            with open(os.path.join(self.fleet_dir, "topology"), "w") as f:
+                for name in self.agents:
+                    f.write(f"{name}=supervisor\n")
+        except OSError:
+            pass
+
+    def _write_live(self):
+        live = {}
+        for name, agent in self.agents.items():
+            alive = agent.is_alive()
+            agent.state["alive"] = alive
+            live[name] = {
+                "alive": alive,
+                "pid": agent.state["pid"],
+                "idle": agent.state["idle"],
+                "last_activity": agent.state["last_activity"],
+            }
+        _atomic_write_json(os.path.join(self.fleet_dir, "live.json"), live)
+
+    def write_supervisor_json(self, host, port):
+        data = {
+            "host": host,
+            "port": port,
+            "pid": os.getpid(),
+            "token": self.token,
+            "agents": list(self.agents.keys()),
+            "started": now_iso(),
+        }
+        _atomic_write_json(os.path.join(self.fleet_dir, "supervisor.json"), data)
+
+    def heartbeat_loop(self):
+        while not self._stopping:
+            self._write_live()
+            time.sleep(HEARTBEAT_SECONDS)
+
+    def state_snapshot(self):
+        return {name: agent.state for name, agent in self.agents.items()}
+
+
+def _atomic_write_json(path, data):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+# ---- HTTP control server ----------------------------------------------------
+def make_handler(sup):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # silence default stderr access log
+            pass
+
+        def _send(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _authed(self):
+            return self.headers.get("X-Fleet-Token") == sup.token
+
+        def do_GET(self):
+            if self.path.startswith("/health"):
+                self._send(200, {"ok": True})
+            elif self.path.startswith("/state"):
+                self._send(200, sup.state_snapshot())
+            else:
+                self._send(404, {"error": "not found"})
+
+        def do_POST(self):
+            if not self.path.startswith("/msg"):
+                self._send(404, {"error": "not found"})
+                return
+            if not self._authed():
+                self._send(403, {"error": "bad or missing X-Fleet-Token"})
+                return
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self._send(400, {"error": "invalid json"})
+                return
+            sender = str(body.get("from") or "human")
+            target = body.get("to")
+            text = body.get("text")
+            if not target or text is None:
+                self._send(400, {"error": "need 'to' and 'text'"})
+                return
+            try:
+                sup.deliver(sender, target, str(text))
+            except KeyError as e:
+                self._send(404, {"error": str(e)})
+                return
+            except RuntimeError as e:
+                self._send(409, {"error": str(e)})
+                return
+            self._send(200, {"ok": True})
+
+    return Handler
+
+
+# ---- entrypoint -------------------------------------------------------------
+def resolve_fleet_dir(cli_value):
+    if cli_value:
+        return cli_value
+    d = os.environ.get("FLEET_DIR", "").strip()
+    if d and os.path.isdir(d):
+        return d
+    cur = os.getcwd()
+    while cur != "/":
+        cand = os.path.join(cur, ".fleet")
+        if os.path.isdir(cand):
+            return cand
+        cur = os.path.dirname(cur)
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Headless tmux-free fleet supervisor")
+    ap.add_argument("--fleet-dir", default=None)
+    ap.add_argument("--agents", default=None, help="path to agents.json")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=0, help="0 = OS-assigned (avoids clashes)")
+    args = ap.parse_args()
+
+    fleet_dir = resolve_fleet_dir(args.fleet_dir)
+    if not fleet_dir or not os.path.isdir(fleet_dir):
+        print("supervisor: no .fleet dir found (set FLEET_DIR or --fleet-dir)", file=sys.stderr)
+        sys.exit(1)
+
+    agents_path = args.agents or os.path.join(fleet_dir, "agents.json")
+    if not os.path.isfile(agents_path):
+        print(f"supervisor: agents manifest not found: {agents_path}", file=sys.stderr)
+        sys.exit(1)
+    with open(agents_path) as f:
+        agents_spec = json.load(f).get("agents", [])
+    if not agents_spec:
+        print("supervisor: agents.json has no agents", file=sys.stderr)
+        sys.exit(1)
+
+    sup = Supervisor(fleet_dir, agents_spec)
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(sup))
+    host, port = server.server_address[0], server.server_address[1]
+
+    def shutdown(signum, frame):
+        log(fleet_dir, f"signal {signum} received, shutting down")
+        sup.stop()
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    sup.start()
+    sup.write_supervisor_json(host, port)
+    threading.Thread(target=sup.heartbeat_loop, daemon=True).start()
+    log(fleet_dir, f"supervisor up on {host}:{port} with {len(sup.agents)} agents")
+    print(f"supervisor: up on http://{host}:{port}  ({len(sup.agents)} agents)  fleet_dir={fleet_dir}")
+    try:
+        server.serve_forever()
+    finally:
+        sup.stop()
+
+
+if __name__ == "__main__":
+    main()

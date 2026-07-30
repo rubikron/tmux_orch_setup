@@ -6,7 +6,8 @@
 #   FLEET_DIR=/path/to/.fleet bin/status
 #
 # Read-only — safe to run anytime, even while the fleet is active.
-# Uses tmux list-sessions, board.json, comms.log, and metrics.jsonl.
+# Liveness comes from live.json (supervisor transport) or tmux (legacy);
+# task/message data from board.json, comms.log, and metrics.jsonl.
 set -euo pipefail
 
 # ---- resolve coordination dir -----------------------------------------------
@@ -35,16 +36,39 @@ red()   { printf '\033[31m%s\033[0m' "$1"; }
 yellow(){ printf '\033[33m%s\033[0m' "$1"; }
 
 # ---- session liveness --------------------------------------------------------
+# Supervisor transport (default): read live.json. tmux transport (legacy): use
+# tmux has-session. Detected by the presence of supervisor.json.
 SESSION_NAMES=(orchestrator worker1 worker2 worker3 worker4)
 alive=""
 dead=""
-for s in "${SESSION_NAMES[@]}"; do
-  if tmux has-session -t "$s" 2>/dev/null; then
-    alive+=" $(green "$s(up)")"
-  else
-    dead+=" $(red "$s(down)")"
-  fi
-done
+if [[ -f "$FLEET_DIR/supervisor.json" ]] && command -v python3 >/dev/null 2>&1; then
+  live_map="$(python3 - "$FLEET_DIR/live.json" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    data = {}
+for name, info in data.items():
+    print(f"{name}\t{'up' if info.get('alive') else 'down'}")
+PY
+)"
+  for s in "${SESSION_NAMES[@]}"; do
+    st="$(printf '%s\n' "$live_map" | awk -F'\t' -v n="$s" '$1==n{print $2}')"
+    if [[ "$st" == "up" ]]; then
+      alive+=" $(green "$s(up)")"
+    else
+      dead+=" $(red "$s(down)")"
+    fi
+  done
+else
+  for s in "${SESSION_NAMES[@]}"; do
+    if tmux has-session -t "$s" 2>/dev/null; then
+      alive+=" $(green "$s(up)")"
+    else
+      dead+=" $(red "$s(down)")"
+    fi
+  done
+fi
 
 # ---- task board (board.json, counted via jq) --------------------------------
 board="$FLEET_DIR/board.json"

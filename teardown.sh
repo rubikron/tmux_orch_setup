@@ -5,7 +5,18 @@
 set -euo pipefail
 REPO="$(cd "${1:-$(pwd)}" && pwd)"
 WT_ROOT="$REPO/.worktrees"
+FLEET_DIR="$REPO/.fleet"
 
+# Supervisor transport: stop the supervisor process (it closes every agent's
+# stdin and terminates the children on SIGTERM).
+if [[ -f "$FLEET_DIR/supervisor.json" ]] && command -v python3 >/dev/null 2>&1; then
+  pid="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pid",""))' "$FLEET_DIR/supervisor.json" 2>/dev/null || true)"
+  if [[ -n "$pid" ]]; then
+    kill "$pid" 2>/dev/null && echo "stopped supervisor (pid $pid)" || true
+  fi
+fi
+
+# tmux transport (legacy): kill any fleet sessions.
 for s in orchestrator worker1 worker2 worker3 worker4; do
   tmux kill-session -t "$s" 2>/dev/null && echo "killed session $s" || true
 done
@@ -26,7 +37,8 @@ done
 # session names are fixed, so one fleet runs per machine and this is safe.
 LOCAL_BIN="$HOME/.local/bin"
 for t in fleet-msg fleet-status fleet-learn fleet-claim fleet-release \
-         fleet-claims fleet-submit fleet-land fleet-board fleet-dashboard; do
+         fleet-claims fleet-submit fleet-land fleet-board fleet-dashboard \
+         fleet-supervisor; do
   f="$LOCAL_BIN/$t"
   [[ -L "$f" ]] && rm -f "$f" && echo "removed CLI symlink $f" || true
 done

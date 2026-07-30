@@ -22,10 +22,14 @@ shared coordination directory. Reusable for any git project.
 
 ## How it works
 
-- **Two planes.** Control plane = tmux `send-keys` (short one-line signals via the
-  `fleet-msg` command). Data plane = files: task specs in `$FLEET_DIR/tasks/`, results
-  as git branches, state in `$FLEET_DIR/BOARD.md`, an audit trail in
-  `$FLEET_DIR/comms.log`.
+- **Two planes.** Control plane = a per-repo **supervisor** that runs each agent
+  headless (`claude -p --input-format stream-json`) and delivers a one-line signal
+  by writing to the target agent's stdin (via the `fleet-msg` command) — no tmux,
+  and multiple fleets can run in different repos without clashing. Data plane =
+  files: task specs in `$FLEET_DIR/tasks/`, results as git branches, state in
+  `$FLEET_DIR/board.json`, an audit trail in `$FLEET_DIR/comms.log`. The legacy
+  tmux transport is still available with `FLEET_TRANSPORT=tmux`. See
+  [docs/transport-supervisor.md](docs/transport-supervisor.md).
 - **Isolation via git worktrees.** Each worker has its own working tree on its own
   branch, so they can't clobber each other. The orchestrator reviews `git diff`
   and merges to `main`.
@@ -38,7 +42,8 @@ shared coordination directory. Reusable for any git project.
 
 ## Prerequisites
 
-- `tmux`, `git`, and `claude` (Claude Code) on your PATH.
+- `git`, `python3`, and `claude` (Claude Code) on your PATH. (`tmux` only for the
+  legacy `FLEET_TRANSPORT=tmux` mode.)
 - Your normal Claude Code auth for the Opus orchestrator.
 - A DeepSeek API key for the workers: `export DEEPSEEK_API_KEY=sk-...`
   (workers use DeepSeek's Anthropic-compatible endpoint, so real Claude Code —
@@ -53,14 +58,16 @@ export DEEPSEEK_API_KEY=sk-...
 ./setup.sh /path/to/your/project        # defaults to the current dir
 ```
 
-Then open four terminal windows and attach one session in each:
+The agents run headless under the supervisor — there are no terminals to attach.
+Watch the fleet through the dashboard or a status snapshot:
 
 ```bash
-tmux attach -t orchestrator
-tmux attach -t worker1
-tmux attach -t worker2
-tmux attach -t worker3
+fleet-dashboard --open       # live web control panel
+fleet-status                 # terminal snapshot
 ```
+
+(For the legacy tmux transport, run `FLEET_TRANSPORT=tmux ./setup.sh ...` and
+attach with `tmux attach -t orchestrator` / `worker1` …)
 
 Tear down with `./teardown.sh /path/to/your/project` (keeps worker branches).
 
@@ -77,8 +84,14 @@ ORCHESTRATOR_PERMISSION_MODE=default ./setup.sh /path/to/your/project
 
 ## Kick it off
 
-Paste your goal into the **orchestrator** window. It will plan first (no coding),
-show you a task breakdown, then start delegating. A template:
+Send your goal to the **orchestrator** with `fleet-msg` (or the dashboard). It
+will plan first (no coding), show a task breakdown, then start delegating:
+
+```bash
+fleet-msg orchestrator "GOAL: <one or two paragraphs — what to build, constraints, definition of done>. Follow your operating manual: plan first, then run your loop."
+```
+
+A fuller template:
 
 ```
 PROJECT GOAL
@@ -102,7 +115,7 @@ Start by giving me the plan.
 
 ```
 fleet/
-├── setup.sh              spin up worktrees + tmux + 5 Claude Code sessions
+├── setup.sh              spin up worktrees + supervisor (or tmux) + 5 Claude Code agents
 ├── teardown.sh           kill sessions, remove worker worktrees
 ├── bin/
 │   ├── msg               one-line inter-agent messenger — installed as `fleet-msg`

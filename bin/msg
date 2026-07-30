@@ -1,30 +1,71 @@
 #!/usr/bin/env bash
-# msg — send a one-line message to another agent's Claude Code session.
+# msg — send a one-line message (a "user turn") to another agent.
 #
-# Usage:  fleet-msg <target-session> <message...>
+# Usage:  fleet-msg <target-agent> <message...>
 # Example: fleet-msg worker1 "TASK t-014: read $FLEET_DIR/tasks/t-014.md"
 #
-# It types the message into the target tmux session as if the user typed it,
-# then appends the same line to the shared comms.log so every exchange is
-# auditable (send-keys itself leaves no record).
+# Transport is auto-detected:
+#   - supervisor mode (default): if $FLEET_DIR/supervisor.json exists, POST the
+#     message to the local supervisor, which writes it to the target agent's
+#     stdin and records it in comms.log. No tmux, no global session names.
+#   - tmux mode (fallback): type the line into the target tmux session with
+#     send-keys and append to comms.log ourselves (legacy behavior).
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: $(basename "$0") <target-session> <message...>" >&2
+  echo "usage: $(basename "$0") <target-agent> <message...>" >&2
   exit 1
 fi
 
 target="$1"; shift
-sender="$(tmux display-message -p '#S' 2>/dev/null || echo human)"
 msg="$*"
 
-# Slash commands (/clear, /compact, …) only register when the "/" is the FIRST
-# character on the target's input line. The normal "[sender -> target] " prefix
-# would push the "/" off the start of the line, so Claude Code would treat the
-# whole thing as plain text and silently ignore the command. Detect a leading
-# "/" and send it bare. In this protocol no real message starts with "/"
-# (they start with TASK/ANS/DONE/…), so this is unambiguous.
-# The audit log still records who sent it, tagged (raw).
+# Sender identity: supervisor launches each agent with FLEET_AGENT set; fall back
+# to the tmux session name, then to "human" for a hand-typed message.
+sender="${FLEET_AGENT:-$(tmux display-message -p '#S' 2>/dev/null || echo human)}"
+
+# Reject embedded newlines — the protocol is one message per line, and comms.log
+# parsing is line-based in both transports.
+if [[ "$msg" == *$'\n'* ]]; then
+  echo "$(basename "$0"): message contains embedded newlines — put multi-line content in a task file, not a message" >&2
+  exit 1
+fi
+
+coord="${FLEET_DIR:-.}"
+supervisor_json="$coord/supervisor.json"
+
+# ---- supervisor transport ---------------------------------------------------
+if [[ -f "$supervisor_json" ]]; then
+  python3 - "$supervisor_json" "$sender" "$target" "$msg" <<'PY'
+import json, sys, urllib.request, urllib.error
+
+sup_path, sender, target, text = sys.argv[1:5]
+with open(sup_path) as f:
+    sup = json.load(f)
+
+url = f"http://{sup['host']}:{sup['port']}/msg"
+payload = json.dumps({"from": sender, "to": target, "text": text}).encode()
+req = urllib.request.Request(
+    url, data=payload, method="POST",
+    headers={"Content-Type": "application/json", "X-Fleet-Token": sup.get("token", "")},
+)
+try:
+    with urllib.request.urlopen(req, timeout=5) as r:
+        json.load(r)  # {"ok": true}
+except urllib.error.HTTPError as e:
+    body = e.read().decode(errors="replace")
+    sys.stderr.write(f"fleet-msg: supervisor rejected message ({e.code}): {body}\n")
+    sys.exit(1)
+except urllib.error.URLError as e:
+    sys.stderr.write(f"fleet-msg: cannot reach supervisor at {url}: {e.reason}\n")
+    sys.exit(1)
+PY
+  exit $?
+fi
+
+# ---- tmux transport (legacy fallback) ---------------------------------------
+# Slash commands only register when "/" is the first character on the input line,
+# so send them bare; otherwise prefix with "[sender -> target] ".
 if [[ "$msg" == /* ]]; then
   line="$msg"
   logline="[$sender -> $target] (raw) $msg"
@@ -33,35 +74,15 @@ else
   logline="$line"
 fi
 
-# Reject embedded newlines — they would submit a partial line as its own
-# Enter-terminated input, silently breaking the one-message-one-line invariant.
-if [[ "$line" == *$'\n'* ]]; then
-  echo "$(basename "$0"): message contains embedded newlines — put multi-line content in a task file, not a message" >&2
-  exit 1
-fi
-
-# Shared coordination directory — used by both control and audit planes.
-coord="${FLEET_DIR:-.}"
 mkdir -p "$coord"
-
-# Control plane: inject the message as a user turn in the target session.
-# -l (literal) stops tmux from interpreting characters as key names.
-# Wrap in flock so concurrent senders to the same target don't mangle each
-# other's lines — the send is two tmux commands and must be atomic.
 lockfile="$coord/.lock.$target"
-# Use a fixed fd (9), not bash 4.1+ `{var}>`-style auto-allocation — macOS ships
-# bash 3.2, which parses `{lock_fd}` as a literal command and dies with exit 127.
 exec 9>"$lockfile" 2>/dev/null || true
-
 if flock -w 2 9 2>/dev/null; then
   tmux send-keys -t "$target" -l "$line"
   tmux send-keys -t "$target" Enter
   flock -u 9 2>/dev/null || true
 else
-  # Graceful degradation: flock is absent on stock macOS — send without locking.
   tmux send-keys -t "$target" -l "$line"
   tmux send-keys -t "$target" Enter
 fi
-
-# Audit plane: one atomic append so the orchestrator (and you) can see all traffic.
 printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$logline" >> "$coord/comms.log"

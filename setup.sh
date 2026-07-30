@@ -41,10 +41,19 @@ UI_TESTER_MODEL="${UI_TESTER_MODEL:-claude-sonnet-5}"
 # (No colon in the expansions below, so an explicit empty value is honoured.)
 ORCHESTRATOR_PERMISSION_MODE="${ORCHESTRATOR_PERMISSION_MODE-auto}"
 WORKER_PERMISSION_MODE="${WORKER_PERMISSION_MODE-auto}"
+# Transport: "supervisor" (default, tmux-free headless stream-json) or "tmux"
+# (legacy). See docs/transport-supervisor.md.
+FLEET_TRANSPORT="${FLEET_TRANSPORT:-supervisor}"
+# Headless agents can't answer permission prompts, so supervisor mode launches
+# them non-interactively. Override per-fleet if you want a stricter mode.
+SUPERVISOR_PERMISSION_MODE="${SUPERVISOR_PERMISSION_MODE:-bypassPermissions}"
 # ---------------------------------------------------------------------------
 
-command -v tmux  >/dev/null || { echo "tmux not found"; exit 1; }
 command -v claude >/dev/null || { echo "claude (Claude Code) not found"; exit 1; }
+command -v python3 >/dev/null || { echo "python3 not found (needed by the supervisor + dashboard)"; exit 1; }
+if [[ "$FLEET_TRANSPORT" == "tmux" ]]; then
+  command -v tmux >/dev/null || { echo "tmux not found (FLEET_TRANSPORT=tmux)"; exit 1; }
+fi
 command -v git   >/dev/null || { echo "git not found"; exit 1; }
 : "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY in your environment or .env file}"
 
@@ -63,9 +72,10 @@ cp "$HERE/bin/claim" "$FLEET_DIR/bin/claim"
 cp "$HERE/bin/submit" "$FLEET_DIR/bin/submit"
 cp "$HERE/bin/land" "$FLEET_DIR/bin/land"
 cp "$HERE/bin/board" "$FLEET_DIR/bin/board"
+cp "$HERE/bin/supervisor" "$FLEET_DIR/bin/supervisor"
 chmod +x "$FLEET_DIR/bin/msg" "$FLEET_DIR/bin/status" "$FLEET_DIR/bin/learn" \
          "$FLEET_DIR/bin/claim" "$FLEET_DIR/bin/submit" "$FLEET_DIR/bin/land" \
-         "$FLEET_DIR/bin/board"
+         "$FLEET_DIR/bin/board" "$FLEET_DIR/bin/supervisor"
 
 # ---- global CLI install ----------------------------------------------------
 # Why: the tmux panes add $FLEET_DIR/bin to PATH, so the tools resolve when a
@@ -90,6 +100,8 @@ ln -sf "$HERE/bin/land"   "$LOCAL_BIN/fleet-land"
 ln -sf "$HERE/bin/board"  "$LOCAL_BIN/fleet-board"
 # fleet-dashboard serves the live web control panel at http://127.0.0.1:7373.
 ln -sf "$HERE/bin/dashboard" "$LOCAL_BIN/fleet-dashboard"
+# fleet-supervisor runs the tmux-free headless transport (FLEET_TRANSPORT=supervisor).
+ln -sf "$HERE/bin/supervisor" "$LOCAL_BIN/fleet-supervisor"
 case ":$PATH:" in
   *":$LOCAL_BIN:"*) : ;;  # already on PATH — good
   *) echo "warning: $LOCAL_BIN is not on your PATH. Add it (e.g. in ~/.zshrc:" \
@@ -195,62 +207,135 @@ CONFEOF
   fi
 fi
 
-# ---- launch helper ---------------------------------------------------------
-# Starts a detached tmux session, exports the shared env, then runs claude with
-# the given role prompt appended to its system prompt.
-start_session () {
-  local name="$1" dir="$2" prompt_file="$3"; shift 3
-  local extra_env=("$@")   # KEY=VALUE strings to export before launching claude
-  tmux kill-session -t "$name" 2>/dev/null || true
-  tmux new-session -d -s "$name" -c "$dir"
-  tmux send-keys -t "$name" "export FLEET_DIR='$FLEET_DIR'" Enter
-  tmux send-keys -t "$name" "export PATH='$FLEET_DIR/bin':\"\$PATH\"" Enter
-  # Orchestrator and UI tester must use real Anthropic auth, never DeepSeek.
-  # If the calling shell has DeepSeek vars set (from a prior session), unset them
-  # BEFORE the extra_env loop so that extra_env can override (e.g. worker4 sets
-  # ANTHROPIC_MODEL=claude-sonnet-5 after the blanket unset).
-  if [[ "$name" == "orchestrator" || "$name" == "worker4" ]]; then
+# ---- launch ----------------------------------------------------------------
+if [[ "$FLEET_TRANSPORT" == "supervisor" ]]; then
+  # -- supervisor transport (default): tmux-free headless stream-json --------
+  # Build the agent manifest with python (clean JSON escaping of keys/paths).
+  # Values are exported so the heredoc reads them from the environment.
+  export _SUP_REPO="$REPO" _SUP_WT="$WT_ROOT" _SUP_HERE="$HERE" \
+         _SUP_PERM="$SUPERVISOR_PERMISSION_MODE" \
+         _SUP_ORCH_MODEL="$ORCHESTRATOR_MODEL" \
+         _SUP_WORKER_MODEL="$WORKER_MODEL" _SUP_UI_MODEL="$UI_TESTER_MODEL" \
+         _SUP_DEEPSEEK_BASE="$DEEPSEEK_BASE" _SUP_DEEPSEEK_KEY="$DEEPSEEK_API_KEY"
+  python3 - "$FLEET_DIR/agents.json" <<'PY'
+import json, os, sys
+here = os.environ["_SUP_HERE"]; repo = os.environ["_SUP_REPO"]
+wt = os.environ["_SUP_WT"]; perm = os.environ["_SUP_PERM"]
+# Orchestrator + UI tester carry NO DeepSeek env; the supervisor strips inherited
+# ANTHROPIC_* so their model/auth comes only from these manifest entries.
+agents = [
+    {"name": "orchestrator", "cwd": repo,
+     "prompt_file": f"{here}/prompts/ORCHESTRATOR.md", "permission_mode": perm,
+     "env": {"ANTHROPIC_MODEL": os.environ["_SUP_ORCH_MODEL"]}},
+]
+for i in (1, 2, 3):
+    agents.append({"name": f"worker{i}", "cwd": f"{wt}/worker{i}",
+                   "prompt_file": f"{here}/prompts/WORKER.md", "permission_mode": perm,
+                   "env": {"ANTHROPIC_BASE_URL": os.environ["_SUP_DEEPSEEK_BASE"],
+                           "ANTHROPIC_AUTH_TOKEN": os.environ["_SUP_DEEPSEEK_KEY"],
+                           "ANTHROPIC_MODEL": os.environ["_SUP_WORKER_MODEL"],
+                           "CLAUDE_CODE_EFFORT_LEVEL": "max"}})
+agents.append({"name": "worker4", "cwd": f"{wt}/worker4",
+               "prompt_file": f"{here}/prompts/UI_TESTER.md", "permission_mode": perm,
+               "env": {"ANTHROPIC_MODEL": os.environ["_SUP_UI_MODEL"],
+                       "CLAUDE_CODE_EFFORT_LEVEL": "max"}})
+with open(sys.argv[1], "w") as f:
+    json.dump({"agents": agents}, f, indent=2)
+PY
+  unset _SUP_REPO _SUP_WT _SUP_HERE _SUP_PERM _SUP_ORCH_MODEL _SUP_WORKER_MODEL \
+        _SUP_UI_MODEL _SUP_DEEPSEEK_BASE _SUP_DEEPSEEK_KEY
+
+  # Launch the supervisor detached. It spawns all agents, holds their pipes, and
+  # serves the control endpoint on an OS-assigned port (advertised in supervisor.json).
+  rm -f "$FLEET_DIR/supervisor.json"
+  FLEET_DIR="$FLEET_DIR" nohup "$FLEET_DIR/bin/supervisor" --fleet-dir "$FLEET_DIR" \
+    >"$FLEET_DIR/supervisor.out" 2>&1 &
+  disown 2>/dev/null || true
+  for _ in $(seq 1 25); do [[ -f "$FLEET_DIR/supervisor.json" ]] && break; sleep 0.2; done
+
+  if [[ ! -f "$FLEET_DIR/supervisor.json" ]]; then
+    echo "supervisor failed to start — see $FLEET_DIR/supervisor.out" >&2
+    exit 1
+  fi
+  sup_port="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["port"])' "$FLEET_DIR/supervisor.json")"
+
+  cat <<EOF
+
+Fleet is up (supervisor transport — no tmux).
+  coordination dir : $FLEET_DIR
+  worktrees        : $WT_ROOT/worker{1,2,3,4}   (branches w1/w2/w3/w4)
+  workers 1-3 on   : $WORKER_MODEL
+  worker4 on       : $UI_TESTER_MODEL  (UI testing specialist)
+  supervisor       : http://127.0.0.1:$sup_port   (pid in supervisor.json)
+  permission mode  : $SUPERVISOR_PERMISSION_MODE (all agents)
+  fleet commands   : fleet-msg / fleet-status / fleet-dashboard  (symlinked into $LOCAL_BIN)
+
+Watch the fleet:
+  fleet-dashboard --open          # live web control panel
+  fleet-status                    # terminal snapshot
+
+Kick off your project goal (no tmux pane to paste into):
+  fleet-msg orchestrator "GOAL: <describe your project goal here>"
+
+Tear down later with:  ./teardown.sh $REPO
+EOF
+
+else
+  # -- tmux transport (legacy) ----------------------------------------------
+  # Starts a detached tmux session, exports the shared env, then runs claude with
+  # the given role prompt appended to its system prompt.
+  start_session () {
+    local name="$1" dir="$2" prompt_file="$3"; shift 3
+    local extra_env=("$@")   # KEY=VALUE strings to export before launching claude
+    tmux kill-session -t "$name" 2>/dev/null || true
+    tmux new-session -d -s "$name" -c "$dir"
+    tmux send-keys -t "$name" "export FLEET_DIR='$FLEET_DIR'" Enter
+    tmux send-keys -t "$name" "export PATH='$FLEET_DIR/bin':\"\$PATH\"" Enter
+    # Also set FLEET_AGENT so fleet-msg/submit derive identity the same way the
+    # supervisor transport does.
+    tmux send-keys -t "$name" "export FLEET_AGENT='$name'" Enter
+    # Orchestrator and UI tester must use real Anthropic auth, never DeepSeek.
+    if [[ "$name" == "orchestrator" || "$name" == "worker4" ]]; then
+      tmux send-keys -t "$name" \
+        "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL" Enter
+    fi
+    for kv in "${extra_env[@]:-}"; do
+      tmux send-keys -t "$name" "export $kv" Enter
+    done
+    # Permission mode per role. Empty = launch claude with no --permission-mode flag.
+    local mode="$WORKER_PERMISSION_MODE"
+    if [[ "$name" == "orchestrator" ]]; then
+      mode="$ORCHESTRATOR_PERMISSION_MODE"
+    fi
+    local perm_flag=""
+    if [[ -n "$mode" ]]; then
+      perm_flag=" --permission-mode $mode"
+    fi
     tmux send-keys -t "$name" \
-      "unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL" Enter
-  fi
-  for kv in "${extra_env[@]:-}"; do
-    tmux send-keys -t "$name" "export $kv" Enter
+      "claude$perm_flag --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
+  }
+
+  # Orchestrator: Opus via real Anthropic auth. No DeepSeek env.
+  start_session orchestrator "$REPO" "$HERE/prompts/ORCHESTRATOR.md" \
+    "ANTHROPIC_MODEL=$ORCHESTRATOR_MODEL"
+
+  # Workers 1-3: DeepSeek via the Anthropic-compatible endpoint.
+  for i in 1 2 3; do
+    start_session "worker$i" "$WT_ROOT/worker$i" "$HERE/prompts/WORKER.md" \
+      "ANTHROPIC_BASE_URL=$DEEPSEEK_BASE" \
+      "ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY" \
+      "ANTHROPIC_MODEL=$WORKER_MODEL" \
+      "CLAUDE_CODE_EFFORT_LEVEL=max"
   done
-  # Permission mode per role (see config block at the top). Empty = launch claude
-  # with no --permission-mode flag, i.e. Claude Code's own default.
-  local mode="$WORKER_PERMISSION_MODE"
-  if [[ "$name" == "orchestrator" ]]; then
-    mode="$ORCHESTRATOR_PERMISSION_MODE"
-  fi
-  local perm_flag=""
-  if [[ -n "$mode" ]]; then
-    perm_flag=" --permission-mode $mode"
-  fi
-  tmux send-keys -t "$name" \
-    "claude$perm_flag --append-system-prompt \"\$(cat '$prompt_file')\"" Enter
-}
 
-# Orchestrator: Opus via real Anthropic auth. No DeepSeek env.
-start_session orchestrator "$REPO" "$HERE/prompts/ORCHESTRATOR.md" \
-  "ANTHROPIC_MODEL=$ORCHESTRATOR_MODEL"
-
-# Workers 1-3: DeepSeek via the Anthropic-compatible endpoint.
-for i in 1 2 3; do
-  start_session "worker$i" "$WT_ROOT/worker$i" "$HERE/prompts/WORKER.md" \
-    "ANTHROPIC_BASE_URL=$DEEPSEEK_BASE" \
-    "ANTHROPIC_AUTH_TOKEN=$DEEPSEEK_API_KEY" \
-    "ANTHROPIC_MODEL=$WORKER_MODEL" \
+  # Worker 4: Sonnet UI tester — uses real Anthropic auth, not DeepSeek.
+  start_session "worker4" "$WT_ROOT/worker4" "$HERE/prompts/UI_TESTER.md" \
+    "ANTHROPIC_MODEL=$UI_TESTER_MODEL" \
     "CLAUDE_CODE_EFFORT_LEVEL=max"
-done
 
-# Worker 4: Sonnet UI tester — uses real Anthropic auth, not DeepSeek.
-start_session "worker4" "$WT_ROOT/worker4" "$HERE/prompts/UI_TESTER.md" \
-  "ANTHROPIC_MODEL=$UI_TESTER_MODEL" \
-  "CLAUDE_CODE_EFFORT_LEVEL=max"
+  cat <<EOF
 
-cat <<EOF
-
-Fleet is up.
+Fleet is up (tmux transport).
   coordination dir : $FLEET_DIR
   worktrees        : $WT_ROOT/worker{1,2,3,4}   (branches w1/w2/w3/w4)
   workers 1-3 on   : $WORKER_MODEL
@@ -268,3 +353,4 @@ Open five terminal windows and attach one session in each:
 Then paste your project goal into the orchestrator (see README kickoff prompt).
 Tear down later with:  ./teardown.sh $REPO
 EOF
+fi

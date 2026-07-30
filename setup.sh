@@ -88,6 +88,8 @@ ln -sf "$HERE/bin/claim"  "$LOCAL_BIN/fleet-claims"
 ln -sf "$HERE/bin/submit" "$LOCAL_BIN/fleet-submit"
 ln -sf "$HERE/bin/land"   "$LOCAL_BIN/fleet-land"
 ln -sf "$HERE/bin/board"  "$LOCAL_BIN/fleet-board"
+# fleet-dashboard serves the live web control panel at http://127.0.0.1:7373.
+ln -sf "$HERE/bin/dashboard" "$LOCAL_BIN/fleet-dashboard"
 case ":$PATH:" in
   *":$LOCAL_BIN:"*) : ;;  # already on PATH — good
   *) echo "warning: $LOCAL_BIN is not on your PATH. Add it (e.g. in ~/.zshrc:" \

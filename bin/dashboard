@@ -19,8 +19,11 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 # ---- resolve coordination dir (mirrors bin/status) --------------------------
 def resolve_fleet_dir():
@@ -202,6 +205,105 @@ def tmux_sessions():
     if out.returncode != 0:
         return set()
     return {s.strip() for s in out.stdout.splitlines() if s.strip()}
+
+
+def load_supervisor(fleet_dir):
+    """Read supervisor.json (host/port/pid/token). None if missing/unreadable."""
+    path = os.path.join(fleet_dir, "supervisor.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def forward_chat_message(supervisor, to, text):
+    """POST {from,to,text} to the supervisor's loopback /msg endpoint.
+    Returns (status_code, body_dict). Never raises — network/parse failures
+    are surfaced as a 502 with an error body."""
+    host = supervisor.get("host", "127.0.0.1")
+    port = supervisor.get("port")
+    token = supervisor.get("token", "")
+    url = f"http://{host}:{port}/msg"
+    payload = json.dumps({"from": "human", "to": to, "text": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Fleet-Token", token)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = resp.read()
+            try:
+                return resp.status, json.loads(body)
+            except ValueError:
+                return resp.status, {"raw": body.decode("utf-8", "replace")}
+    except urllib.error.HTTPError as e:
+        body = e.read()
+        try:
+            return e.code, json.loads(body)
+        except ValueError:
+            return e.code, {"error": body.decode("utf-8", "replace") or str(e)}
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return 502, {"error": f"could not reach supervisor: {e}"}
+
+
+def _tool_preview(tool_input, limit=90):
+    """A short, single-line preview of a tool_use input for the compact log row."""
+    try:
+        s = json.dumps(tool_input, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        s = str(tool_input)
+    s = " ".join(s.split())
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def parse_chat_events(path, since=0):
+    """Return (messages, total_lines) for an agent's events/<agent>.jsonl,
+    mapping each JSON line at index i >= since into zero or more chat
+    messages. Unparseable or irrelevant lines (system/init, rate_limit,
+    stderr) are skipped, never raised."""
+    if not os.path.isfile(path):
+        return [], 0
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return [], 0
+    total = len(lines)
+    start = max(0, since)
+    out = []
+    for i in range(start, total):
+        line = lines[i].strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        etype = ev.get("type")
+        if etype == "assistant":
+            content = ((ev.get("message") or {}).get("content")) or []
+            for block in content:
+                btype = block.get("type")
+                if btype == "text" and block.get("text"):
+                    out.append({"seq": i, "role": "assistant", "kind": "text", "text": block["text"]})
+                elif btype == "tool_use":
+                    out.append({
+                        "seq": i, "role": "assistant", "kind": "tool",
+                        "text": block.get("name", "tool"),
+                        "detail": _tool_preview(block.get("input", {})),
+                    })
+        elif etype == "result":
+            out.append({
+                "seq": i, "role": "assistant", "kind": "result",
+                "text": ev.get("result", "") or "",
+                "cost": ev.get("total_cost_usd"),
+                "turns": ev.get("num_turns"),
+                "isError": bool(ev.get("is_error")),
+            })
+        # system/init, rate_limit_event, stderr, and anything else: skip silently
+    return out, total
 
 
 def build_state(fleet_dir):
@@ -459,6 +561,97 @@ PAGE = r"""<!doctype html>
   .offline{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
     background:rgba(10,12,16,.78);z-index:60;color:var(--text-dim);font-size:14px}
   body.disconnected .offline{display:flex}
+
+  /* ---- chat panel ---- */
+  .chat-toggle{
+    display:flex;align-items:center;gap:7px;
+    background:var(--panel-2);border:1px solid var(--border);border-radius:7px;
+    color:var(--text-dim);font:inherit;font-size:11.5px;font-weight:600;letter-spacing:.3px;
+    padding:7px 12px;cursor:pointer;transition:background .15s,border-color .15s,color .15s;
+  }
+  .chat-toggle:hover{border-color:var(--border-strong);color:var(--text)}
+  .chat-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .chat-toggle .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+  .chat-toggle[aria-expanded="true"]{background:var(--accent-dim);border-color:rgba(91,140,255,.4);color:var(--text)}
+
+  .chat-panel{
+    position:fixed;top:60px;right:0;bottom:0;width:min(400px,92vw);
+    background:var(--panel);border-left:1px solid var(--border-strong);
+    display:flex;flex-direction:column;z-index:50;
+    transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);
+    box-shadow:-10px 0 28px rgba(0,0,0,.4);
+  }
+  .chat-panel.open{transform:translateX(0)}
+  .chat-head{
+    display:flex;align-items:center;gap:8px;padding:12px 14px;
+    border-bottom:1px solid var(--border);flex:none;
+  }
+  .chat-agent-select{
+    flex:1;background:var(--panel-2);border:1px solid var(--border);border-radius:6px;
+    color:var(--text);font:inherit;font-size:12.5px;font-weight:600;padding:7px 8px;cursor:pointer;
+  }
+  .chat-agent-select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .chat-close{
+    flex:none;background:transparent;border:none;color:var(--text-faint);font-size:20px;line-height:1;
+    cursor:pointer;padding:3px 8px;border-radius:5px;transition:background .15s,color .15s;
+  }
+  .chat-close:hover{color:var(--text);background:var(--panel-2)}
+  .chat-close:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+  .chat-transcript{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:9px}
+  .chat-empty{color:var(--text-faint);font-size:12px;font-style:italic;text-align:center;margin-top:22px}
+
+  .chat-bubble{
+    max-width:88%;padding:9px 12px;border-radius:10px;font-size:12.5px;line-height:1.5;
+    white-space:pre-wrap;word-break:break-word;
+  }
+  .chat-bubble.user{
+    align-self:flex-end;background:var(--accent-dim);border:1px solid rgba(91,140,255,.35);
+    color:var(--text);border-bottom-right-radius:3px;
+  }
+  .chat-bubble.assistant{
+    align-self:flex-start;background:var(--panel-2);border:1px solid var(--border);
+    color:var(--text);border-bottom-left-radius:3px;
+  }
+  .chat-code{
+    display:block;margin:6px 0;padding:8px 10px;background:var(--bg);border:1px solid var(--border);
+    border-radius:6px;font-size:11.5px;line-height:1.5;overflow-x:auto;white-space:pre;color:#a9c2ff;
+  }
+  .chat-tool-row{
+    align-self:flex-start;max-width:94%;display:flex;align-items:center;gap:7px;
+    font-size:11px;color:var(--text-faint);padding:1px 2px;
+  }
+  .chat-tool-dot{width:5px;height:5px;border-radius:50%;background:var(--accent);flex:none;opacity:.75}
+  .chat-tool-name{color:var(--text-dim);font-weight:600;flex:none}
+  .chat-tool-detail{color:var(--text-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chat-result-divider{
+    align-self:stretch;display:flex;align-items:center;gap:8px;
+    font-size:9.5px;letter-spacing:.5px;color:var(--text-faint);text-transform:uppercase;margin:2px 0;
+  }
+  .chat-result-divider::before,.chat-result-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+  .chat-result-divider.err{color:var(--danger)}
+  .chat-result-divider.err::before,.chat-result-divider.err::after{background:rgba(248,113,113,.3)}
+
+  .chat-error-banner{
+    margin:0 14px 10px;padding:7px 10px;border-radius:6px;background:var(--danger-dim);
+    border:1px solid rgba(248,113,113,.35);color:#ffb4b0;font-size:11px;flex:none;
+  }
+  .chat-composer{
+    display:flex;gap:8px;align-items:flex-end;padding:12px 14px;border-top:1px solid var(--border);flex:none;
+  }
+  .chat-input{
+    flex:1;resize:none;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;
+    color:var(--text);font:inherit;font-size:12.5px;padding:9px 11px;line-height:1.4;
+    max-height:140px;min-height:38px;
+  }
+  .chat-input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .chat-input::placeholder{color:var(--text-faint)}
+  .chat-send{
+    flex:none;background:var(--accent);border:none;border-radius:8px;color:#fff;font-weight:700;
+    font-size:12px;padding:9px 14px;cursor:pointer;transition:opacity .15s;
+  }
+  .chat-send:hover{opacity:.88}
+  .chat-send:disabled{opacity:.5;cursor:default}
 </style>
 </head>
 <body>
@@ -467,8 +660,26 @@ PAGE = r"""<!doctype html>
       <h1>Fleet Control<span class="sub">live operations map</span></h1>
     </div>
     <div class="totals" id="totals"></div>
+    <button class="chat-toggle" id="chat-toggle" aria-expanded="false" aria-controls="chat-panel">
+      <span class="dot"></span>Chat
+    </button>
     <div class="clock"><span id="clock" class="mono">--:--:--</span><small id="uptime">since —</small></div>
   </header>
+
+  <aside class="chat-panel" id="chat-panel" aria-hidden="true">
+    <div class="chat-head">
+      <select class="chat-agent-select mono" id="chat-agent"></select>
+      <button class="chat-close" id="chat-close" aria-label="Close chat">&times;</button>
+    </div>
+    <div class="chat-transcript" id="chat-transcript">
+      <div class="chat-empty">No messages yet.</div>
+    </div>
+    <div class="chat-error-banner" id="chat-error" hidden></div>
+    <div class="chat-composer">
+      <textarea class="chat-input" id="chat-input" rows="1" placeholder="Message orchestrator…"></textarea>
+      <button class="chat-send" id="chat-send">Send</button>
+    </div>
+  </aside>
 
   <div id="stage">
     <svg class="wires" id="wires"><g id="static-wires"></g></svg>
@@ -811,6 +1022,179 @@ async function poll(){
 poll();
 setInterval(poll, 1200);
 window.addEventListener('resize', drawStaticWires);
+
+// ---- chat panel ----
+const chatToggle = document.getElementById('chat-toggle');
+const chatPanel = document.getElementById('chat-panel');
+const chatClose = document.getElementById('chat-close');
+const chatAgentSel = document.getElementById('chat-agent');
+const chatTranscript = document.getElementById('chat-transcript');
+const chatErrorEl = document.getElementById('chat-error');
+const chatInput = document.getElementById('chat-input');
+const chatSendBtn = document.getElementById('chat-send');
+
+for (const name of Object.keys(LAYOUT)){
+  const opt = document.createElement('option');
+  opt.value = name; opt.textContent = name;
+  chatAgentSel.appendChild(opt);
+}
+let chatAgent = chatAgentSel.value = 'orchestrator';
+let chatSince = 0;
+let chatOpen = false;
+let chatPollTimer = null;
+let chatScrolledUp = false;
+
+function setChatOpen(open){
+  chatOpen = open;
+  chatPanel.classList.toggle('open', open);
+  chatPanel.setAttribute('aria-hidden', open ? 'false' : 'true');
+  chatToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open){ startChatPoll(); chatInput.focus(); } else { stopChatPoll(); }
+}
+chatToggle.addEventListener('click', ()=> setChatOpen(!chatOpen));
+chatClose.addEventListener('click', ()=> setChatOpen(false));
+document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape' && chatOpen) setChatOpen(false); });
+
+chatAgentSel.addEventListener('change', ()=>{
+  chatAgent = chatAgentSel.value;
+  chatInput.placeholder = `Message ${chatAgent}…`;
+  chatSince = 0;
+  chatScrolledUp = false;
+  chatTranscript.innerHTML = '<div class="chat-empty">No messages yet.</div>';
+  showChatError('');
+  if (chatOpen) pollChat();
+});
+chatInput.placeholder = `Message ${chatAgent}…`;
+
+function startChatPoll(){
+  stopChatPoll();
+  pollChat();
+  chatPollTimer = setInterval(pollChat, 1000);
+}
+function stopChatPoll(){
+  if (chatPollTimer){ clearInterval(chatPollTimer); chatPollTimer = null; }
+}
+
+function showChatError(msg){
+  if (!msg){ chatErrorEl.hidden = true; chatErrorEl.textContent = ''; return; }
+  chatErrorEl.hidden = false;
+  chatErrorEl.textContent = msg;
+}
+
+async function pollChat(){
+  const agent = chatAgent; // guard against a race with an agent switch mid-flight
+  try{
+    const r = await fetch(`/api/chat?agent=${encodeURIComponent(agent)}&since=${chatSince}`, {cache:'no-store'});
+    const data = await r.json().catch(()=>({}));
+    if (agent !== chatAgent) return; // user switched away while this was in flight
+    if (!r.ok){ showChatError(data.error || `chat request failed (${r.status})`); return; }
+    showChatError(data.error || '');
+    if (data.messages && data.messages.length) appendChatMessages(data.messages);
+    if (typeof data.total === 'number') chatSince = data.total;
+  } catch(e){
+    if (agent === chatAgent) showChatError('lost connection to dashboard server');
+  }
+}
+
+function renderRichText(text){
+  const parts = [];
+  const re = /```[a-zA-Z0-9_+-]*\n?([\s\S]*?)```/g;
+  let last = 0, m;
+  while ((m = re.exec(text||''))){
+    if (m.index > last) parts.push({code:false, v:text.slice(last, m.index)});
+    parts.push({code:true, v:m[1]});
+    last = re.lastIndex;
+  }
+  if (last < (text||'').length) parts.push({code:false, v:text.slice(last)});
+  if (!parts.length) parts.push({code:false, v:''});
+  return parts.map(p => p.code
+    ? `<pre class="chat-code mono">${esc(p.v)}</pre>`
+    : esc(p.v)
+  ).join('');
+}
+
+function chatBubble(role, text){
+  const d = document.createElement('div');
+  d.className = 'chat-bubble ' + role;
+  d.innerHTML = renderRichText(text);
+  return d;
+}
+function chatToolRow(m){
+  const d = document.createElement('div');
+  d.className = 'chat-tool-row';
+  d.innerHTML = `<span class="chat-tool-dot"></span><span class="chat-tool-name mono">${esc(m.text)}</span>`+
+    (m.detail ? `<span class="chat-tool-detail mono" title="${esc(m.detail)}">${esc(m.detail)}</span>` : '');
+  return d;
+}
+function chatResultDivider(m){
+  const d = document.createElement('div');
+  d.className = 'chat-result-divider' + (m.isError ? ' err' : '');
+  const bits = [];
+  if (typeof m.cost === 'number') bits.push('$'+m.cost.toFixed(4));
+  if (typeof m.turns === 'number') bits.push(m.turns + (m.turns===1?' turn':' turns'));
+  const label = (m.isError ? 'turn ended · error' : 'turn complete') + (bits.length ? ' · '+bits.join(' · ') : '');
+  d.innerHTML = `<span>${esc(label)}</span>`;
+  return d;
+}
+function chatNodesFor(m){
+  if (m.kind === 'tool') return [chatToolRow(m)];
+  if (m.kind === 'result'){
+    const nodes = [];
+    if (m.text) nodes.push(chatBubble('assistant', m.text));
+    nodes.push(chatResultDivider(m));
+    return nodes;
+  }
+  return [chatBubble(m.role === 'user' ? 'user' : 'assistant', m.text || '')];
+}
+function appendChatMessages(msgs){
+  const empty = chatTranscript.querySelector('.chat-empty');
+  if (empty) empty.remove();
+  const frag = document.createDocumentFragment();
+  for (const m of msgs) for (const n of chatNodesFor(m)) frag.appendChild(n);
+  chatTranscript.appendChild(frag);
+  if (!chatScrolledUp) chatTranscript.scrollTop = chatTranscript.scrollHeight;
+}
+chatTranscript.addEventListener('scroll', ()=>{
+  const gap = chatTranscript.scrollHeight - chatTranscript.scrollTop - chatTranscript.clientHeight;
+  chatScrolledUp = gap > 40;
+});
+
+function autosizeChatInput(){
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 140) + 'px';
+}
+chatInput.addEventListener('input', autosizeChatInput);
+
+async function sendChatMessage(){
+  const text = chatInput.value;
+  if (!text.trim() || chatSendBtn.disabled) return;
+  const agent = chatAgent;
+  chatInput.value = '';
+  autosizeChatInput();
+  appendChatMessages([{role:'user', kind:'text', text}]);
+  chatSendBtn.disabled = true;
+  try{
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({to: agent, text}),
+    });
+    const data = await r.json().catch(()=>({}));
+    if (!r.ok || data.error) showChatError(data.error || `send failed (${r.status})`);
+    else showChatError('');
+  } catch(e){
+    showChatError('could not reach dashboard server');
+  } finally {
+    chatSendBtn.disabled = false;
+  }
+}
+chatSendBtn.addEventListener('click', sendChatMessage);
+chatInput.addEventListener('keydown', (e)=>{
+  if (e.key === 'Enter' && !e.shiftKey){
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
 </script>
 </body>
 </html>"""
@@ -834,13 +1218,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/state":
             try:
                 state = build_state(self.fleet_dir)
                 self._send(200, json.dumps(state), "application/json")
             except Exception as e:  # never let a parse hiccup kill the page
                 self._send(200, json.dumps({"error": str(e)}), "application/json")
+        elif path == "/api/chat":
+            self._handle_chat_get(parse_qs(parsed.query))
         elif path == "/" or path == "/index.html":
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif path == "/favicon.ico":
@@ -849,6 +1236,52 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
         else:
             self._send(404, "not found", "text/plain")
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/chat":
+            self._handle_chat_post()
+        else:
+            self._send(404, "not found", "text/plain")
+
+    def _handle_chat_get(self, query):
+        agent = (query.get("agent") or [""])[0]
+        if agent not in SESSIONS:
+            self._send(400, json.dumps({"error": "unknown agent"}), "application/json")
+            return
+        try:
+            since = int((query.get("since") or ["0"])[0])
+        except ValueError:
+            since = 0
+        events_path = os.path.join(self.fleet_dir, "events", f"{agent}.jsonl")
+        try:
+            messages, total = parse_chat_events(events_path, since)
+            self._send(200, json.dumps({"messages": messages, "total": total}), "application/json")
+        except Exception as e:  # never let a parse hiccup kill the panel
+            self._send(200, json.dumps({"messages": [], "total": since, "error": str(e)}), "application/json")
+
+    def _handle_chat_post(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            data = json.loads(raw) if raw else {}
+        except ValueError:
+            self._send(400, json.dumps({"error": "invalid JSON body"}), "application/json")
+            return
+        to = data.get("to")
+        text = data.get("text")
+        if to not in SESSIONS:
+            self._send(400, json.dumps({"error": "unknown agent"}), "application/json")
+            return
+        if not isinstance(text, str) or not text.strip():
+            self._send(400, json.dumps({"error": "text is required"}), "application/json")
+            return
+        supervisor = load_supervisor(self.fleet_dir)
+        if not supervisor or not supervisor.get("port"):
+            self._send(503, json.dumps({"error": "supervisor not running"}), "application/json")
+            return
+        status, body = forward_chat_message(supervisor, to, text)
+        self._send(status, json.dumps(body), "application/json")
 
 
 def main():

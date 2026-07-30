@@ -26,7 +26,7 @@ done
 # session names are fixed, so one fleet runs per machine and this is safe.
 LOCAL_BIN="$HOME/.local/bin"
 for t in fleet-msg fleet-status fleet-learn fleet-claim fleet-release \
-         fleet-claims fleet-submit fleet-land fleet-board; do
+         fleet-claims fleet-submit fleet-land fleet-board fleet-dashboard; do
   f="$LOCAL_BIN/$t"
   [[ -L "$f" ]] && rm -f "$f" && echo "removed CLI symlink $f" || true
 done

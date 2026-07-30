@@ -1,0 +1,865 @@
+#!/usr/bin/env python3
+# dashboard — a live, animated control-panel view of the Claude Code Fleet.
+#
+# Usage:
+#   bin/dashboard                     # auto-detect FLEET_DIR, serve on :7373
+#   FLEET_DIR=/path/.fleet bin/dashboard --port 8080
+#   bin/dashboard --open              # also open the page in your browser
+#
+# Read-only. Safe to run anytime, even while the fleet is active. It parses the
+# same files fleet-status does — board.json, comms.log, inbox/, claims.tsv,
+# merge-queue, metrics.jsonl, topology — and serves them as JSON at /api/state,
+# plus a self-contained HTML page at / that renders the operation as a live
+# operations map: the orchestrator and workers as status nodes wired together,
+# each new message animating as a token gliding from sender to recipient, inbox
+# queues, the task board, the merge queue, and a scannable activity log. Pure
+# Python stdlib, no dependencies, no build step.
+import argparse
+import json
+import os
+import re
+import sys
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ---- resolve coordination dir (mirrors bin/status) --------------------------
+def resolve_fleet_dir():
+    d = os.environ.get("FLEET_DIR", "").strip()
+    if d and os.path.isdir(d):
+        return d
+    cur = os.getcwd()
+    while cur != "/":
+        cand = os.path.join(cur, ".fleet")
+        if os.path.isdir(cand):
+            return cand
+        cur = os.path.dirname(cur)
+    return None
+
+
+# ---- parsers ----------------------------------------------------------------
+SESSIONS = ["orchestrator", "worker1", "worker2", "worker3", "worker4"]
+KNOWN_TYPES = {"TASK", "ANS", "DONE", "BLOCKED", "REVISE", "FYI", "ASK"}
+
+# "<ts> [<sender> -> <target>] <body>"
+COMMS_RE = re.compile(r"^(\S+)\s+\[([^\]]+?)\s*->\s*([^\]]+?)\]\s*(.*)$")
+
+
+def classify(body):
+    """Derive a message type from the body's leading token."""
+    if not body:
+        return "MSG"
+    first = body.split(None, 1)[0]
+    if first == "(raw)":
+        return "RAW"
+    if first in KNOWN_TYPES:
+        return first
+    return "MSG"
+
+
+def parse_comms(path, tail=300):
+    """Return (messages, total). Each message carries its true line index (seq)
+    so the browser can animate only lines it has not seen yet."""
+    if not os.path.isfile(path):
+        return [], 0
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return [], 0
+    total = len(lines)
+    start = max(0, total - tail)
+    out = []
+    for i in range(start, total):
+        line = lines[i]
+        m = COMMS_RE.match(line)
+        if not m:
+            continue
+        ts, sender, target, body = m.groups()
+        out.append({
+            "seq": i,
+            "ts": ts,
+            "sender": sender,
+            "target": target,
+            "type": classify(body),
+            "text": body,
+        })
+    return out, total
+
+
+def load_board(path):
+    if not os.path.isfile(path):
+        return [], []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return [], []
+    tasks = []
+    for t in data.get("tasks", []):
+        tasks.append({
+            "id": t.get("id", "?"),
+            "state": t.get("state", "QUEUED"),
+            "assignee": t.get("assignee", ""),
+            "files": t.get("files", []) or [],
+            "deps": t.get("deps", []) or [],
+            "revises": t.get("revises", 0) or 0,
+            "notes": t.get("notes", "") or "",
+        })
+    return tasks, data.get("reflections", [])
+
+
+def load_inbox(inbox_dir):
+    """session -> number of undrained mail lines."""
+    counts = {}
+    if not os.path.isdir(inbox_dir):
+        return counts
+    for name in os.listdir(inbox_dir):
+        p = os.path.join(inbox_dir, name)
+        if not os.path.isfile(p) or ".drain." in name:
+            continue
+        try:
+            with open(p, "r", errors="replace") as f:
+                n = sum(1 for ln in f if ln.strip())
+        except OSError:
+            n = 0
+        if n:
+            counts[name] = n
+    return counts
+
+
+def load_claims(path):
+    """claims.tsv rows: task \\t worker \\t file (status prints $3 file, $1 task)."""
+    rows = []
+    if not os.path.isfile(path):
+        return rows
+    try:
+        with open(path, "r", errors="replace") as f:
+            for ln in f:
+                parts = ln.rstrip("\n").split("\t")
+                if len(parts) >= 3 and parts[0]:
+                    rows.append({"task": parts[0], "worker": parts[1], "file": parts[2]})
+    except OSError:
+        pass
+    return rows
+
+
+def load_merge_queue(path):
+    rows = []
+    if not os.path.isfile(path):
+        return rows
+    try:
+        with open(path, "r", errors="replace") as f:
+            for ln in f:
+                parts = ln.rstrip("\n").split("\t")
+                if parts and parts[0]:
+                    rows.append({
+                        "task": parts[0],
+                        "branch": parts[1] if len(parts) > 1 else "",
+                        "worker": parts[2] if len(parts) > 2 else "",
+                    })
+    except OSError:
+        pass
+    return rows
+
+
+def load_topology(path):
+    modes = {}
+    if not os.path.isfile(path):
+        return modes
+    try:
+        with open(path) as f:
+            for ln in f:
+                if "=" in ln:
+                    k, v = ln.strip().split("=", 1)
+                    modes[k] = v
+    except OSError:
+        pass
+    return modes
+
+
+def tmux_sessions():
+    """Live tmux session names, or None if tmux is unavailable."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return set()
+    return {s.strip() for s in out.stdout.splitlines() if s.strip()}
+
+
+def build_state(fleet_dir):
+    comms_path = os.path.join(fleet_dir, "comms.log")
+    messages, total_msgs = parse_comms(comms_path)
+    tasks, reflections = load_board(os.path.join(fleet_dir, "board.json"))
+    inbox = load_inbox(os.path.join(fleet_dir, "inbox"))
+    claims = load_claims(os.path.join(fleet_dir, "claims.tsv"))
+    queue = load_merge_queue(os.path.join(fleet_dir, "merge-queue"))
+    modes = load_topology(os.path.join(fleet_dir, "topology"))
+    live = tmux_sessions()
+
+    # per-session liveness, respecting topology (native != down)
+    sessions = []
+    for name in SESSIONS:
+        mode = modes.get(name, "tmux")
+        if live is None:
+            status = "unknown"
+        elif name in live:
+            status = "up"
+        elif mode == "native":
+            status = "native"
+        else:
+            status = "down"
+        sessions.append({"name": name, "mode": mode, "status": status})
+
+    # what is each worker doing? derived from the active/blocked task it owns.
+    activity = {}
+    for t in tasks:
+        who = t["assignee"]
+        if not who:
+            continue
+        if t["state"] == "ACTIVE":
+            activity[who] = {"kind": "working", "task": t["id"], "notes": t["notes"]}
+        elif t["state"] == "BLOCKED" and activity.get(who, {}).get("kind") != "working":
+            activity[who] = {"kind": "blocked", "task": t["id"], "notes": t["notes"]}
+
+    first_ts = messages[0]["ts"] if messages else None
+    counts = {
+        "total": len(tasks),
+        "queued": sum(1 for t in tasks if t["state"] == "QUEUED"),
+        "active": sum(1 for t in tasks if t["state"] == "ACTIVE"),
+        "blocked": sum(1 for t in tasks if t["state"] == "BLOCKED"),
+        "merged": sum(1 for t in tasks if t["state"] == "MERGED"),
+        "messages": total_msgs,
+        "revises": sum(1 for m in messages if m["type"] == "REVISE"),
+    }
+    return {
+        "sessions": sessions,
+        "activity": activity,
+        "tasks": tasks,
+        "reflections": reflections,
+        "messages": messages,
+        "inbox": inbox,
+        "claims": claims,
+        "queue": queue,
+        "counts": counts,
+        "firstTs": first_ts,
+    }
+
+
+# ---- the page (self-contained, no external assets) --------------------------
+PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Control</title>
+<style>
+  :root{
+    --bg:#0a0c10; --panel:#12151a; --panel-2:#171b21;
+    --border:#242a33; --border-strong:#3a4250;
+    --text:#e7eaef; --text-dim:#98a1b0; --text-faint:#5b6472;
+    --accent:#5b8cff; --accent-dim:rgba(91,140,255,.16);
+    --ok:#34d399; --ok-dim:rgba(52,211,153,.16);
+    --warn:#f5a524; --warn-dim:rgba(245,165,36,.16);
+    --danger:#f87171; --danger-dim:rgba(248,113,113,.16);
+    --t-TASK:#5b8cff; --t-DONE:#34d399; --t-REVISE:#f5a524; --t-BLOCKED:#f87171;
+    --t-ASK:#a78bfa; --t-ANS:#2dd4bf; --t-FYI:#8b93a1; --t-MSG:#8b93a1; --t-RAW:#5b6472;
+    --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-synthesis:none;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-variant-numeric:tabular-nums;
+    color:var(--text);
+    background:var(--bg);
+    overflow:hidden;
+  }
+  .mono{font-family:var(--font-mono)}
+
+  /* ---- top bar ---- */
+  header{
+    display:flex;align-items:center;gap:20px;
+    height:60px;padding:0 24px;
+    background:var(--panel);
+    border-bottom:1px solid var(--border);
+    position:relative;z-index:40;
+  }
+  header h1{
+    margin:0;font-size:14px;letter-spacing:1px;font-weight:700;
+    text-transform:uppercase;color:var(--text);
+  }
+  header h1 .sub{color:var(--text-faint);font-size:11px;letter-spacing:.5px;text-transform:none;
+    font-weight:500;margin-left:10px}
+  .totals{display:flex;gap:8px;margin-left:auto;align-items:center;flex-wrap:wrap}
+  .stat{display:flex;flex-direction:column;align-items:center;line-height:1.1;min-width:56px;
+    background:var(--panel-2);border:1px solid var(--border);border-radius:7px;padding:5px 10px}
+  .stat b{font-family:var(--font-mono);font-size:16px;font-weight:600}
+  .stat span{font-size:8.5px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-faint);margin-top:1px}
+  .stat.q b{color:var(--text-dim)} .stat.a b{color:var(--warn)}
+  .stat.m b{color:var(--ok)} .stat.b b{color:var(--danger)}
+  .clock{font-family:var(--font-mono);color:var(--text);font-size:14px;text-align:right}
+  .clock small{display:block;font-size:9px;color:var(--text-faint);letter-spacing:.5px;font-family:-apple-system,sans-serif}
+
+  /* ---- stage ---- */
+  #stage{position:absolute;inset:60px 0 216px 0;overflow:hidden;
+    background-image:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+    background-size:40px 40px;
+  }
+  svg.wires{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:5}
+  #flyer{position:absolute;inset:0;pointer-events:none;z-index:30}
+
+  /* ---- nodes (agent stations) ---- */
+  .node{
+    position:absolute;width:190px;transform:translate(-50%,-50%);
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:10px;padding:11px 13px 10px;
+    box-shadow:0 2px 8px rgba(0,0,0,.35);z-index:10;
+    transition:box-shadow .3s, border-color .3s;
+  }
+  .node.head{width:210px;border-color:var(--border-strong)}
+  .node .row-top{display:flex;align-items:center;gap:8px}
+  .dot{
+    width:9px;height:9px;border-radius:50%;flex:none;
+    background:var(--text-faint);
+    transition:box-shadow .4s, background .4s;
+  }
+  .node.on .dot{background:var(--ok);box-shadow:0 0 0 4px var(--ok-dim)}
+  .node.blocked .dot{background:var(--danger);box-shadow:0 0 0 4px var(--danger-dim)}
+  .node .name{font-weight:600;font-size:13px;letter-spacing:.2px}
+  .node .model{font-size:9px;color:var(--text-faint);letter-spacing:.6px;text-transform:uppercase;
+    margin-left:auto;border:1px solid var(--border);border-radius:4px;padding:1px 6px}
+  .node.head .name{color:var(--accent)}
+  .role{font-size:10.5px;color:var(--text-dim);margin:3px 0 8px;letter-spacing:.2px}
+  .statusline{font-size:12px;min-height:30px;color:var(--text)}
+  .statusline .doing{color:var(--text)}
+  .statusline .tid{font-weight:600;color:var(--accent);font-family:var(--font-mono);font-size:11.5px}
+  .node.on .statusline .tid{color:var(--ok)}
+  .node.blocked .statusline .tid{color:var(--danger)}
+  .statusline .notes{color:var(--text-dim);font-size:11px;line-height:1.3;margin-top:2px;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .idle .statusline .idle-label{color:var(--text-faint)}
+
+  /* inbox */
+  .inbox{margin-top:9px;display:flex;align-items:center;gap:8px;min-height:16px}
+  .inbox .label{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--text-faint)}
+  .inbox-dots{display:flex;gap:3px;flex:1}
+  .dot-mini{width:5px;height:5px;border-radius:1px;background:var(--accent);opacity:.55}
+  .inbox .n{font-size:12.5px;font-weight:700;font-family:var(--font-mono);color:var(--accent)}
+  .inbox.empty .n{color:var(--text-faint)}
+  .inbox.bump{animation:bump .5s}
+  @keyframes bump{30%{transform:translateY(-3px)}60%{transform:translateY(0)}}
+
+  /* claimed files */
+  .files{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
+  .file-chip{font-size:9.5px;padding:2px 6px;border-radius:4px;
+    background:var(--accent-dim);border:1px solid rgba(91,140,255,.35);color:#a9c2ff;
+    max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* merge queue card */
+  .queue-card{
+    position:absolute;transform:translate(-50%,-50%);z-index:9;width:140px;
+    background:var(--panel);border:1px solid var(--border);
+    border-radius:10px;padding:9px 11px;text-align:center;
+  }
+  .queue-card h4{margin:0 0 4px;font-size:9.5px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-faint);font-weight:600}
+  .queue-card .qd{font-family:var(--font-mono);font-size:22px;font-weight:700;color:var(--warn);line-height:1}
+  .queue-card.zero .qd{color:var(--text-faint)}
+
+  /* task board */
+  .board{
+    position:absolute;top:10px;bottom:10px;width:170px;z-index:8;
+    background:var(--panel);border:1px solid var(--border);border-radius:9px;
+    padding:9px 9px 6px;display:flex;flex-direction:column;
+  }
+  .board-left{left:10px} .board-right{right:10px}
+  .board h4{margin:0 0 8px;font-size:9.5px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-dim);
+    text-align:left;font-weight:700;border-bottom:1px solid var(--border);padding-bottom:6px}
+  .task-rows{display:flex;flex-direction:column;gap:4px;overflow:hidden;flex:1}
+  .task-row{
+    display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:5px;
+    font-size:10.5px;background:var(--panel-2);border-left:3px solid var(--text-faint);
+  }
+  .task-row .sid{font-weight:600;font-family:var(--font-mono);font-size:10px}
+  .task-row .who{margin-left:auto;font-size:9px;color:var(--text-faint)}
+  .task-row.QUEUED{border-left-color:var(--text-faint)}
+  .task-row.ACTIVE{border-left-color:var(--warn);background:var(--warn-dim)}
+  .task-row.BLOCKED{border-left-color:var(--danger);background:var(--danger-dim)}
+  .task-row.MERGED{border-left-color:var(--ok);opacity:.55}
+  .task-row .rev{color:var(--warn);font-size:9px}
+  .board .empty{color:var(--text-faint);font-size:10.5px;font-style:italic;text-align:center;margin-top:14px}
+
+  /* flying token */
+  .token{position:absolute;padding:2px 7px;border-radius:999px;
+    display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;
+    letter-spacing:.3px;white-space:nowrap;
+    box-shadow:0 3px 8px rgba(0,0,0,.5);will-change:transform,opacity;}
+
+  /* human node */
+  .human-node{position:absolute;transform:translate(-50%,-50%);z-index:9;
+    display:flex;align-items:center;gap:6px;
+    font-size:10px;font-weight:600;color:var(--text-dim);letter-spacing:1px;text-align:center;
+    border:1px solid var(--border-strong);border-radius:7px;padding:6px 12px;
+    background:var(--panel-2)}
+  .human-node::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+
+  /* activity log */
+  footer{
+    position:absolute;left:0;right:0;bottom:0;height:216px;
+    background:var(--panel);
+    border-top:1px solid var(--border);padding:12px 24px;z-index:40;
+    display:flex;flex-direction:column;gap:8px;
+  }
+  .log-head{display:flex;align-items:center;justify-content:space-between}
+  .log-title{font-size:10.5px;letter-spacing:1.2px;text-transform:uppercase;color:var(--text-dim);font-weight:700}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  .legend .li{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--text-faint);letter-spacing:.3px}
+  .legend .dot{width:7px;height:7px;border-radius:2px}
+  .log-rows{flex:1;overflow:hidden;display:flex;flex-direction:column;gap:3px}
+  .log-row{display:grid;grid-template-columns:60px 68px 190px 1fr;align-items:center;gap:10px;
+    font-size:12px;padding:4px 8px;border-radius:5px;animation:rowin .3s}
+  @keyframes rowin{from{opacity:0}to{opacity:1}}
+  .log-row:nth-child(even){background:rgba(255,255,255,.02)}
+  .log-row .t{color:var(--text-faint);font-family:var(--font-mono);font-size:10.5px}
+  .log-row .badge{font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;text-align:center;letter-spacing:.3px}
+  .log-row .flow{color:var(--text-dim);font-family:var(--font-mono);font-size:11px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .log-row .flow b{color:var(--text);font-weight:600}
+  .log-row .msg{color:var(--text);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .log-empty{color:var(--text-faint);font-size:12px;font-style:italic;padding:8px}
+
+  .offline{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    background:rgba(10,12,16,.78);z-index:60;color:var(--text-dim);font-size:14px}
+  body.disconnected .offline{display:flex}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>Fleet Control<span class="sub">live operations map</span></h1>
+    </div>
+    <div class="totals" id="totals"></div>
+    <div class="clock"><span id="clock" class="mono">--:--:--</span><small id="uptime">since —</small></div>
+  </header>
+
+  <div id="stage">
+    <svg class="wires" id="wires"><g id="static-wires"></g></svg>
+
+    <div class="board board-left" id="board-active">
+      <h4>In Progress</h4>
+      <div class="task-rows" id="rows-active"></div>
+    </div>
+    <div class="board board-right" id="board-queue">
+      <h4>Queue</h4>
+      <div class="task-rows" id="rows-queue"></div>
+    </div>
+
+    <div id="nodes"></div>
+    <div class="queue-card zero" id="counter">
+      <h4>Merge Queue</h4>
+      <div class="qd" id="qd">0</div>
+    </div>
+    <div class="human-node" id="door">HUMAN</div>
+
+    <div id="flyer"></div>
+    <div class="offline"><div>reconnecting…</div></div>
+  </div>
+
+  <footer>
+    <div class="log-head">
+      <span class="log-title">Activity Log</span>
+      <div class="legend" id="legend"></div>
+    </div>
+    <div class="log-rows" id="log-rows"></div>
+  </footer>
+
+<script>
+const TYPES = ['TASK','ANS','DONE','REVISE','ASK','BLOCKED','FYI','MSG','RAW'];
+const DARK_TEXT_TYPES = new Set(['DONE','REVISE','ANS']); // lighter hues need dark text for contrast
+const TYPE_COLOR = t => getComputedStyle(document.documentElement)
+  .getPropertyValue('--t-' + (TYPES.includes(t)?t:'MSG')).trim() || '#8b93a1';
+
+// node layout as fractions of the stage (x,y = center)
+const LAYOUT = {
+  orchestrator:{x:.5, y:.18, head:true, role:'Coordinator', model:'Opus'},
+  worker1:{x:.20, y:.60, role:'Implementer', model:'DeepSeek'},
+  worker2:{x:.38, y:.74, role:'Implementer', model:'DeepSeek'},
+  worker3:{x:.62, y:.74, role:'Implementer', model:'DeepSeek'},
+  worker4:{x:.80, y:.60, role:'UI / Gallery', model:'Sonnet'},
+};
+const COUNTER_POS = {x:.5, y:.40};
+const DOOR_POS = {x:.5, y:.025};
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+const stage = document.getElementById('stage');
+const nodesEl = document.getElementById('nodes');
+const flyer = document.getElementById('flyer');
+const wires = document.getElementById('wires');
+const staticWires = document.getElementById('static-wires');
+
+// build nodes once
+const deskEls = {};
+for (const [name,cfg] of Object.entries(LAYOUT)){
+  const d = document.createElement('div');
+  d.className = 'node idle' + (cfg.head?' head':'');
+  d.id = 'node-' + name;
+  d.style.left = (cfg.x*100)+'%';
+  d.style.top  = (cfg.y*100)+'%';
+  d.innerHTML =
+    '<div class="row-top"><span class="dot"></span>'+
+    '<span class="name">'+name+'</span>'+
+    '<span class="model">'+cfg.model+'</span></div>'+
+    '<div class="role">'+cfg.role+'</div>'+
+    '<div class="statusline" data-status></div>'+
+    '<div class="files" data-files></div>'+
+    '<div class="inbox empty"><span class="label">inbox</span>'+
+      '<div class="inbox-dots" data-dots></div><span class="n" data-n>0</span></div>';
+  nodesEl.appendChild(d);
+  deskEls[name] = d;
+}
+
+function stageRect(){ return stage.getBoundingClientRect(); }
+function centerOf(name){
+  const el = deskEls[name];
+  const s = stageRect();
+  if (el){
+    const r = el.getBoundingClientRect();
+    return {x:r.left - s.left + r.width/2, y:r.top - s.top + r.height/2};
+  }
+  // fallbacks: the counter, the door, or dead-center
+  if (name === 'human' || name === 'user') return {x:DOOR_POS.x*s.width, y:DOOR_POS.y*s.height};
+  return {x:.5*s.width, y:.5*s.height};
+}
+
+// place counter + door by fraction
+function placeFixed(){
+  const c = document.getElementById('counter');
+  c.style.left = (COUNTER_POS.x*100)+'%'; c.style.top = (COUNTER_POS.y*100)+'%';
+  const door = document.getElementById('door');
+  door.style.left = (DOOR_POS.x*100)+'%'; door.style.top = (DOOR_POS.y*100)+'%';
+}
+placeFixed();
+
+// ---- static hub-and-spoke wires: a calm, always-visible map of who talks to whom ----
+function drawStaticWires(){
+  staticWires.innerHTML = '';
+  const hub = centerOf('orchestrator');
+  const spokes = ['worker1','worker2','worker3','worker4'];
+  for (const name of spokes){
+    line(hub, centerOf(name));
+  }
+  const counterEl = document.getElementById('counter');
+  const r = counterEl.getBoundingClientRect(), s = stageRect();
+  line(hub, {x:r.left-s.left+r.width/2, y:r.top-s.top+r.height/2});
+}
+function line(a,b){
+  const el = document.createElementNS(SVG_NS,'line');
+  el.setAttribute('x1',a.x); el.setAttribute('y1',a.y);
+  el.setAttribute('x2',b.x); el.setAttribute('y2',b.y);
+  el.setAttribute('stroke','var(--border-strong)');
+  el.setAttribute('stroke-width','1');
+  el.setAttribute('opacity','0.55');
+  staticWires.appendChild(el);
+}
+drawStaticWires();
+
+// ---- flying token animation (new message: sender -> target) ----
+function fly(msg){
+  const a = centerOf(msg.sender), b = centerOf(msg.target);
+  const color = TYPE_COLOR(msg.type);
+  const el = document.createElement('div');
+  el.className = 'token';
+  el.style.background = color;
+  el.style.color = DARK_TEXT_TYPES.has(msg.type) ? '#0a0c10' : '#fff';
+  el.textContent = msg.type;
+  flyer.appendChild(el);
+
+  // faint trail along the path actually taken
+  const path = document.createElementNS(SVG_NS,'path');
+  const mx = (a.x+b.x)/2, my = (a.y+b.y)/2 - Math.min(120, Math.hypot(b.x-a.x,b.y-a.y)*0.28);
+  path.setAttribute('d', `M ${a.x} ${a.y} Q ${mx} ${my} ${b.x} ${b.y}`);
+  path.setAttribute('fill','none');
+  path.setAttribute('stroke', color);
+  path.setAttribute('stroke-width','1.5');
+  path.setAttribute('stroke-linecap','round');
+  path.setAttribute('opacity','0.5');
+  wires.appendChild(path);
+  path.animate([{opacity:.5},{opacity:0}], {duration:1400, easing:'ease-out'})
+      .onfinish = () => path.remove();
+
+  pulseNode(msg.sender);
+  const dur = 1200;
+  const start = performance.now();
+  function frame(now){
+    let t = (now-start)/dur; if (t>1) t=1;
+    const et = t<.5 ? 2*t*t : -1+(4-2*t)*t; // easeInOutQuad
+    const x = (1-et)*(1-et)*a.x + 2*(1-et)*et*mx + et*et*b.x;
+    const y = (1-et)*(1-et)*a.y + 2*(1-et)*et*my + et*et*b.y;
+    el.style.transform = `translate(${x-16}px,${y-9}px)`;
+    el.style.opacity = t<.12 ? (t/.12) : (t>.85 ? (1-(t-.85)/.15) : 1);
+    if (t<1) requestAnimationFrame(frame); else { el.remove(); flashInbox(msg.target); }
+  }
+  requestAnimationFrame(frame);
+}
+function pulseNode(name){
+  const d = deskEls[name]; if(!d) return;
+  d.classList.add('on'); clearTimeout(d._lt);
+  d._lt = setTimeout(()=>{ if(!d.dataset.active) d.classList.remove('on'); }, 900);
+}
+function flashInbox(name){
+  const d = deskEls[name]; if(!d) return;
+  const inbox = d.querySelector('.inbox');
+  inbox.classList.remove('bump'); void inbox.offsetWidth; inbox.classList.add('bump');
+}
+
+// ---- render state ----
+function renderTotals(c){
+  const el = document.getElementById('totals');
+  el.innerHTML =
+    stat('q','QUEUED',c.queued)+stat('a','ACTIVE',c.active)+
+    stat('b','BLOCKED',c.blocked)+stat('m','MERGED',c.merged)+
+    stat('','MSGS',c.messages)+stat('','REVISE',c.revises);
+}
+function stat(cls,label,v){
+  return `<div class="stat ${cls}"><b>${v}</b><span>${label}</span></div>`;
+}
+
+function esc(s){ return (s||'').replace(/[&<>]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
+
+function renderDesks(state){
+  const act = state.activity || {};
+  for (const name of Object.keys(LAYOUT)){
+    const d = deskEls[name];
+    const sess = (state.sessions||[]).find(s=>s.name===name) || {};
+    const a = act[name];
+    const status = d.querySelector('[data-status]');
+    const files = d.querySelector('[data-files]');
+    d.classList.remove('on','idle','blocked'); delete d.dataset.active;
+
+    if (a && a.kind === 'working'){
+      d.classList.add('on'); d.dataset.active = '1';
+      status.innerHTML = `<div class="doing">working <span class="tid">${esc(a.task)}</span></div>`+
+        (a.notes?`<div class="notes">${esc(a.notes)}</div>`:'');
+    } else if (a && a.kind === 'blocked'){
+      d.classList.add('blocked');
+      status.innerHTML = `<div class="doing">blocked on <span class="tid">${esc(a.task)}</span></div>`+
+        (a.notes?`<div class="notes">${esc(a.notes)}</div>`:'');
+    } else {
+      d.classList.add('idle');
+      let label = 'idle';
+      if (sess.status === 'down') label = 'offline';
+      else if (sess.status === 'native') label = 'native session';
+      else if (name === 'orchestrator') label = 'monitoring fleet';
+      status.innerHTML = `<div class="idle-label">${label}</div>`;
+    }
+    // claimed files
+    const mine = (state.claims||[]).filter(c=>c.worker===name);
+    files.innerHTML = mine.slice(0,3).map(c=>`<span class="file-chip" title="${esc(c.file)}">${esc(shortFile(c.file))}</span>`).join('')
+      + (mine.length>3?`<span class="file-chip">+${mine.length-3}</span>`:'');
+
+    // inbox
+    const n = (state.inbox||{})[name] || 0;
+    setInbox(d, n);
+  }
+}
+function shortFile(f){ const p=(f||'').split('/'); return p[p.length-1]||f; }
+function setInbox(d, n){
+  const inbox = d.querySelector('.inbox');
+  const dots = d.querySelector('[data-dots]');
+  const nEl = d.querySelector('[data-n]');
+  const prev = +nEl.textContent || 0;
+  nEl.textContent = n;
+  inbox.classList.toggle('empty', n===0);
+  const show = Math.min(n, 5);
+  if (dots.childElementCount !== show){
+    dots.innerHTML = '';
+    for (let i=0;i<show;i++){ const b=document.createElement('div'); b.className='dot-mini'; dots.appendChild(b); }
+  }
+  if (n>prev){ inbox.classList.remove('bump'); void inbox.offsetWidth; inbox.classList.add('bump'); }
+}
+
+function renderBoards(tasks){
+  const active = tasks.filter(t=>t.state==='ACTIVE'||t.state==='BLOCKED');
+  const rest = tasks.filter(t=>t.state==='QUEUED'||t.state==='MERGED')
+    .sort((a,b)=> (a.state==='QUEUED'?0:1)-(b.state==='QUEUED'?0:1));
+  fillBoard('rows-active', active, 'Nothing in progress');
+  fillBoard('rows-queue', rest, 'Queue empty');
+}
+function fillBoard(id, list, emptyMsg){
+  const el = document.getElementById(id);
+  if (!list.length){ el.innerHTML = `<div class="empty">${emptyMsg}</div>`; return; }
+  el.innerHTML = list.slice(0,14).map(t=>
+    `<div class="task-row ${t.state}"><span class="sid">${esc(t.id)}</span>`+
+    (t.revises>0?`<span class="rev">↻${t.revises}</span>`:'')+
+    `<span class="who">${esc(t.assignee||'')}</span></div>`).join('');
+}
+
+function renderCounter(queue){
+  const el = document.getElementById('counter');
+  const n = (queue||[]).length;
+  document.getElementById('qd').textContent = n;
+  el.classList.toggle('zero', n===0);
+}
+
+function shortTime(ts){
+  if (!ts) return '';
+  const t = ts.replace('T',' ').split(' ')[1] || ts;
+  return t.slice(0,8);
+}
+
+function renderTicker(messages){
+  const el = document.getElementById('log-rows');
+  const last = messages.slice(-6).reverse();
+  if (!last.length){ el.innerHTML = '<div class="log-empty">No activity yet</div>'; return; }
+  el.innerHTML = last.map(m=>{
+    const color = TYPE_COLOR(m.type);
+    const textColor = DARK_TEXT_TYPES.has(m.type) ? '#0a0c10' : '#fff';
+    return '<div class="log-row">'+
+      `<span class="t">${esc(shortTime(m.ts))}</span>`+
+      `<span class="badge" style="background:${color};color:${textColor}">${esc(m.type)}</span>`+
+      `<span class="flow"><b>${esc(m.sender)}</b> → ${esc(m.target)}</span>`+
+      `<span class="msg">${esc(stripType(m.text))}</span>`+
+    '</div>';
+  }).join('');
+}
+function stripType(text){
+  const parts = (text||'').split(/\s+/);
+  if (TYPES.includes(parts[0]) || parts[0]==='(raw)') return parts.slice(1).join(' ');
+  return text;
+}
+
+function renderLegend(){
+  const el = document.getElementById('legend');
+  el.innerHTML = ['TASK','DONE','REVISE','ASK','ANS','BLOCKED','FYI'].map(t=>
+    `<span class="li"><span class="dot" style="background:${TYPE_COLOR(t)}"></span>${t}</span>`).join('');
+}
+renderLegend();
+
+// ---- clock / uptime ----
+let firstTs = null;
+function tickClock(){
+  const now = new Date();
+  document.getElementById('clock').textContent = now.toTimeString().slice(0,8);
+  const up = document.getElementById('uptime');
+  if (firstTs){
+    const start = new Date(firstTs.replace(' ','T'));
+    if (!isNaN(start)){
+      let s = Math.max(0,(now-start)/1000);
+      const h=Math.floor(s/3600), m=Math.floor(s%3600/60), ss=Math.floor(s%60);
+      up.textContent = 'up ' + (h?h+'h ':'') + m+'m '+ss+'s';
+    } else up.textContent = 'since '+firstTs;
+  } else up.textContent = 'idle — no traffic yet';
+}
+setInterval(tickClock, 1000); tickClock();
+
+// ---- poll loop ----
+let lastSeq = -1, primed = false;
+async function poll(){
+  try{
+    const r = await fetch('/api/state', {cache:'no-store'});
+    const st = await r.json();
+    document.body.classList.remove('disconnected');
+    if (st.error) return;
+    firstTs = st.firstTs;
+    renderTotals(st.counts);
+    renderDesks(st);
+    renderBoards(st.tasks||[]);
+    renderCounter(st.queue||[]);
+    renderTicker(st.messages||[]);
+
+    const msgs = st.messages||[];
+    const maxSeq = msgs.length ? msgs[msgs.length-1].seq : -1;
+    if (!primed){ lastSeq = maxSeq; primed = true; }   // don't flood on first load
+    else {
+      const fresh = msgs.filter(m=>m.seq>lastSeq);
+      // stagger so a burst reads as a flurry of tokens, not a single frame
+      fresh.forEach((m,i)=> setTimeout(()=>fly(m), i*180));
+      if (maxSeq>lastSeq) lastSeq = maxSeq;
+    }
+  } catch(e){
+    document.body.classList.add('disconnected');
+  }
+}
+poll();
+setInterval(poll, 1200);
+window.addEventListener('resize', drawStaticWires);
+</script>
+</body>
+</html>"""
+
+
+# ---- HTTP -------------------------------------------------------------------
+class Handler(BaseHTTPRequestHandler):
+    fleet_dir = None
+
+    def log_message(self, *a):  # quiet
+        pass
+
+    def _send(self, code, body, ctype):
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/state":
+            try:
+                state = build_state(self.fleet_dir)
+                self._send(200, json.dumps(state), "application/json")
+            except Exception as e:  # never let a parse hiccup kill the page
+                self._send(200, json.dumps({"error": str(e)}), "application/json")
+        elif path == "/" or path == "/index.html":
+            self._send(200, PAGE, "text/html; charset=utf-8")
+        elif path == "/favicon.ico":
+            # No icon to serve; answer cleanly so the browser console stays quiet.
+            self.send_response(204)
+            self.end_headers()
+        else:
+            self._send(404, "not found", "text/plain")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Live library-floor dashboard for the Claude Code Fleet.")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("FLEET_DASHBOARD_PORT", "7373")))
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--open", action="store_true", help="open the page in a browser")
+    args = ap.parse_args()
+
+    fleet_dir = resolve_fleet_dir()
+    if not fleet_dir:
+        print("dashboard: no .fleet/ coordination dir found — is the fleet running?", file=sys.stderr)
+        sys.exit(1)
+
+    Handler.fleet_dir = fleet_dir
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    url = f"http://{args.host}:{args.port}/"
+    print(f"fleet dashboard — reading {fleet_dir}")
+    print(f"  open {url}  (Ctrl-C to stop)")
+    if args.open:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\ndashboard: stopped")
+
+
+if __name__ == "__main__":
+    main()

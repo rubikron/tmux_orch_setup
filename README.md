@@ -106,7 +106,8 @@ fleet/
 ├── teardown.sh           kill sessions, remove worker worktrees
 ├── bin/
 │   ├── msg               one-line inter-agent messenger — installed as `fleet-msg`
-│   ├── status            live fleet dashboard — installed as `fleet-status`
+│   ├── status            live text dashboard — installed as `fleet-status`
+│   ├── dashboard         live web control panel — installed as `fleet-dashboard`
 │   └── learn             post-run analysis — installed as `fleet-learn`
 ├── prompts/
 │   ├── ORCHESTRATOR.md   Opus tech-lead operating manual
@@ -121,8 +122,17 @@ The fleet records structured metrics and supports live monitoring:
 
 | Command | Description |
 |---------|-------------|
-| `fleet-status` | Live dashboard: session health, task board, recent traffic, worker stats |
+| `fleet-status` | Live text dashboard: session health, task board, recent traffic, worker stats |
+| `fleet-dashboard` | Live web control panel — a top-down operations map: the orchestrator and workers as status nodes wired together, each new message animating as a token gliding from sender to recipient, inbox queues, the task board, the merge queue, and a scannable activity log. Read-only; safe to run anytime. |
 | `fleet-learn` | Post-run analysis: REVISE rates, worker utilization, task-size patterns, suggestions |
+
+**Live web control panel:** `fleet-dashboard` serves an animated operations
+map at `http://127.0.0.1:7373` (Ctrl-C to stop; `--port` to change, `--open`
+to launch a browser). It polls the same coordination files `fleet-status`
+reads — `board.json`, `comms.log`, `inbox/`, `claims.tsv`, `merge-queue` — so
+every new message animates as a token gliding from sender to recipient, a
+working agent's status dot goes green, a blocked one red, and undrained mail
+stacks in each node's inbox. Pure Python stdlib, no dependencies, no build step.
 
 **Metrics:** The orchestrator appends one JSON line per task to `.fleet/metrics.jsonl`.
 After teardown, run `fleet-learn` to analyze the run and append findings to

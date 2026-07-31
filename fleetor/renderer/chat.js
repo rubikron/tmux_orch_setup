@@ -426,6 +426,10 @@ export function initChat({ baseUrl }) {
 
   function open() {
     chatOpen = true;
+    chatInput.disabled = false;
+    chatSendBtn.disabled = false;
+    // clear the initial "Select an agent…" empty-state so backfill starts clean
+    chatTranscript.innerHTML = '<div class="chat-empty">No messages yet.</div>';
     if (chatPanel) {
       chatPanel.classList.toggle('open', true);
       chatPanel.setAttribute('aria-hidden', 'false');
@@ -436,6 +440,8 @@ export function initChat({ baseUrl }) {
 
   function close() {
     chatOpen = false;
+    chatInput.disabled = true;
+    chatSendBtn.disabled = true;
     if (chatPanel) {
       chatPanel.classList.toggle('open', false);
       chatPanel.setAttribute('aria-hidden', 'true');

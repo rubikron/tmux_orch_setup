@@ -1,2 +1,6 @@
 .env.local
 __pycache__/
+.fleet/
+.worktrees/
+.claude/
+test-projects/

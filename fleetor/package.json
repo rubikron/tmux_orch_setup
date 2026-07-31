@@ -9,8 +9,10 @@
     "postinstall": "electron-rebuild -f -w node-pty"
   },
   "dependencies": {
+    "@electron/rebuild": "^3.7.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "electron": "^33.2.1",
-    "node-pty": "^1.1.0",
-    "@electron/rebuild": "^3.7.1"
+    "node-pty": "^1.1.0"
   }
 }

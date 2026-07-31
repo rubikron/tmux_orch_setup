@@ -84,9 +84,22 @@ fleetor/
     to the renderer as a spawn log. Poll for `<repoPath>/.fleet/supervisor.json` (mirrors setup.sh's own
     wait) to confirm up. **Never log the key.**
   - On success, start the dashboard API: `spawn('python3', [<kit>/bin/dashboard, '--port', <freePort>], {env:{FLEET_DIR:<repo>/.fleet}})`.
-    Choose `<freePort>` by binding a `net.Server` to port 0 first. Expose the port to the renderer.
-  - `stop(repoPath)` → run `teardown.sh <repoPath>`, then kill the dashboard subprocess.
-  - Kill both child processes on app quit.
+    **Always pick a free `<freePort>` dynamically** by binding a `net.Server` to port 0, reading the
+    assigned port, closing it, then passing that port to `bin/dashboard`. **Never hard-code or assume a
+    port, and explicitly never use 7373** (see the port-safety rule below). Retry on a fresh free port if
+    the spawn fails with an address-in-use error. Expose the chosen port to the renderer.
+  - `stop(repoPath)` → run `teardown.sh <repoPath>`, then kill **only the dashboard subprocess this app
+    started** (tracked by its child-process handle/PID).
+  - Kill only the child processes this app spawned, on app quit. See the port-safety rule below.
+
+- **Port safety (CRITICAL — the developer runs their own fleet on :7373 during dev):**
+  - The app **must never bind, probe-to-kill, or shut down port 7373**, and must never kill any process
+    it did not itself spawn. A separate, already-working orchestrator + `fleet-dashboard` is expected to
+    be running on :7373 throughout development — leave it completely untouched.
+  - Track every child process (`setup.sh`, `teardown.sh`, the dashboard server, ptys) by its own handle.
+    Stop/quit only ever terminates those tracked handles — never a `pkill`/port-scan-and-kill.
+  - The app's dashboard server always runs on its own dynamically-assigned free port (0-bind), so it can
+    coexist with the :7373 instance without any conflict.
 - **pty-manager.js** — `node-pty.spawn(shell, [], {cwd: repoPath, env})` where env prepends
   `~/.local/bin` to PATH and sets `FLEET_DIR=<repo>/.fleet`, `FLEET_AGENT=human` so the `fleet-*`
   commands resolve exactly as documented. Forward `onData`→renderer and renderer input→`pty.write`;
@@ -142,8 +155,12 @@ it's unnecessary — the renderer simply ignores `/`.
 
 ## Verification (end-to-end)
 
+0. **Coexistence precondition:** assume a developer-owned fleet + `fleet-dashboard` is already running on
+   **:7373** against a different repo. It must remain fully up and untouched through the entire test — the
+   app must never bind, probe, or kill 7373. Confirm the app picks its own free port (not 7373) and that
+   7373 is still serving after every Spawn/Stop/quit.
 1. `cd fleetor && npm install && npm start` → app window opens with empty states.
-2. **Open…** → pick a scratch repo (e.g. `test-projects/…` or the chess sandbox).
+2. **Open…** → pick a *separate* scratch repo (e.g. `test-projects/…`), not the :7373 dev repo.
 3. Ensure `DEEPSEEK_API_KEY` is available (`.env.local` exists in the kit root) → press **Spawn**.
    Spawn log streams `setup.sh` output; status chips flip to "supervisor up, 5/5 alive" once
    `.fleet/supervisor.json` appears.

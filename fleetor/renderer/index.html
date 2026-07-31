@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src http://127.0.0.1:*;">
+  <title>fleetor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+
+    <!-- ====== Top Bar ====== -->
+    <header id="topbar">
+      <div class="topbar-left">
+        <span class="logo">⚡ fleetor</span>
+        <span id="repo-path" class="repo-path">No repo selected</span>
+      </div>
+      <div class="topbar-center">
+        <button id="btn-open" class="btn btn-secondary">Open…</button>
+        <button id="btn-spawn" class="btn btn-primary" disabled>Spawn</button>
+        <button id="btn-stop" class="btn btn-danger" disabled>Stop</button>
+      </div>
+      <div class="topbar-right">
+        <div id="status-chips" class="status-chips">
+          <span class="chip chip-dim">—</span>
+        </div>
+        <button id="btn-settings" class="btn btn-ghost" title="Settings">⚙</button>
+      </div>
+
+      <!-- Settings Popover -->
+      <div id="settings-popover" class="popover hidden">
+        <label for="deepseek-key">DeepSeek API Key</label>
+        <input type="password" id="deepseek-key" placeholder="sk-…" autocomplete="off">
+      </div>
+    </header>
+
+    <!-- ====== Spawn Log (collapsible, above panes) ====== -->
+    <pre id="spawn-log" class="spawn-log hidden"></pre>
+
+    <!-- ====== 3-Pane Body ====== -->
+    <div class="panes">
+
+      <!-- Pane: Operations / Map -->
+      <section id="pane-map" class="pane pane-map">
+        <div class="pane-header">Operations</div>
+        <div class="offline overlay hidden">Disconnected</div>
+        <div id="totals" class="map-totals">No fleet running</div>
+        <svg id="wires" class="wires-svg">
+          <g id="static-wires"></g>
+        </svg>
+        <div id="nodes" class="nodes-container"></div>
+        <div id="flyer" class="flyer hidden"></div>
+        <div id="counter" class="counter"></div>
+        <div id="qd" class="qd"></div>
+        <div id="door" class="door"></div>
+        <div id="board-active" class="board-section">
+          <h4>Active</h4>
+          <div id="rows-active"></div>
+        </div>
+        <div id="board-queue" class="board-section">
+          <h4>Queue</h4>
+          <div id="rows-queue"></div>
+        </div>
+        <div id="log-rows" class="log-rows"></div>
+        <div id="legend" class="legend"></div>
+        <div id="clock" class="clock">—</div>
+        <div id="uptime" class="uptime">—</div>
+        <div id="stage" class="stage"></div>
+      </section>
+
+      <!-- Pane: Chat -->
+      <section id="pane-chat" class="pane pane-chat">
+        <div class="pane-header">
+          Chat
+          <button id="chat-toggle" class="btn btn-ghost btn-sm" title="Toggle chat">▼</button>
+        </div>
+        <div id="chat-panel" class="chat-panel">
+          <div class="chat-toolbar">
+            <select id="chat-agent">
+              <option value="orchestrator">orchestrator</option>
+              <option value="worker1">worker1</option>
+              <option value="worker2">worker2</option>
+              <option value="worker3">worker3</option>
+              <option value="worker4">worker4</option>
+            </select>
+            <button id="chat-close" class="btn btn-ghost btn-sm">✕</button>
+          </div>
+          <div id="chat-transcript" class="chat-transcript">
+            <div class="empty-state">Select an agent to start chatting</div>
+          </div>
+          <div id="chat-error" class="chat-error hidden"></div>
+          <div class="chat-input-row">
+            <textarea id="chat-input" rows="1" placeholder="Message…" disabled></textarea>
+            <button id="chat-send" class="btn btn-primary btn-sm" disabled>Send</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Pane: Terminal -->
+      <section id="pane-terminal" class="pane pane-terminal">
+        <div class="pane-header">Terminal</div>
+        <div id="term-mount"></div>
+      </section>
+
+    </div><!-- /.panes -->
+  </div><!-- /#app -->
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

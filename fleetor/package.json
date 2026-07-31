@@ -1,0 +1,16 @@
+{
+  "name": "fleetor",
+  "version": "0.1.0",
+  "description": "Electron desktop wrapper for fleet orchestration",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "electron-rebuild -f -w node-pty"
+  },
+  "dependencies": {
+    "electron": "^33.2.1",
+    "node-pty": "^1.1.0",
+    "@electron/rebuild": "^3.7.1"
+  }
+}

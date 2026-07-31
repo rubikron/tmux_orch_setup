@@ -261,7 +261,9 @@ export function initMap({ baseUrl }) {
       const r = await fetch(baseUrl + '/api/state', {cache:'no-store'});
       const st = await r.json();
       const pane = document.getElementById('pane-map');
+      const offlineOverlay = document.querySelector('#pane-map .offline.overlay');
       if (pane) pane.classList.remove('disconnected');
+      if (offlineOverlay) offlineOverlay.classList.add('hidden');
       if (st.error) return;
       firstTs = st.firstTs;
       renderTotals(st.counts);
@@ -280,7 +282,9 @@ export function initMap({ baseUrl }) {
       }
     } catch(e){
       const pane = document.getElementById('pane-map');
+      const offlineOverlay = document.querySelector('#pane-map .offline.overlay');
       if (pane) pane.classList.add('disconnected');
+      if (offlineOverlay) offlineOverlay.classList.remove('hidden');
     }
   }
 
@@ -293,6 +297,8 @@ export function initMap({ baseUrl }) {
     staticWires = document.getElementById('static-wires');
 
     // build nodes once
+    nodesEl.innerHTML = '';
+    flyer.innerHTML = '';
     for (const [name,cfg] of Object.entries(LAYOUT)){
       const d = document.createElement('div');
       d.className = 'node idle' + (cfg.head?' head':'');

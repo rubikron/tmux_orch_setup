@@ -26,6 +26,7 @@ export function initChat({ baseUrl }) {
   const chatClose = document.getElementById('chat-close');
 
   // ---- agent select population ----
+  chatAgentSel.innerHTML = '';
   for (const name of AGENTS) {
     const opt = document.createElement('option');
     opt.value = name;

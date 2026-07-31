@@ -83,7 +83,7 @@ html, body {
    ============================================================ */
 #app {
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr;
+  grid-template-rows: var(--topbar-h) auto 1fr;
   grid-template-columns: 1fr;
   height: 100vh;
   width: 100vw;
@@ -294,6 +294,7 @@ html, body {
    Spawn Log
    ============================================================ */
 .spawn-log {
+  grid-row: 2;
   background: var(--bg);
   color: var(--text-dim);
   font-family: var(--font-mono);
@@ -311,6 +312,7 @@ html, body {
    3-Pane Layout
    ============================================================ */
 .panes {
+  grid-row: 3;
   display: grid;
   grid-template-columns: 1fr 360px;
   grid-template-rows: 1fr 200px;

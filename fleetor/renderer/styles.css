@@ -53,6 +53,7 @@
 
   /* Sizing */
   --topbar-h:       44px;
+  --pane-header-h:  24px;
   --radius:         6px;
   --radius-sm:      4px;
 }
@@ -347,6 +348,7 @@ html, body {
 }
 
 .pane-header {
+  height: var(--pane-header-h);
   padding: 4px 10px;
   font-size: 10px;
   font-weight: 600;
@@ -372,10 +374,10 @@ html, body {
  * and position boards/counter/door/log/legend as overlays.
  */
 
-/* -- stage (fills pane, provides coordinate space) -- */
+/* -- stage (fills pane below the header, provides coordinate space) -- */
 #stage {
   position: absolute;
-  inset: 0;
+  inset: var(--pane-header-h) 0 0 0;
   overflow: hidden;
   background-image:
     linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
@@ -387,7 +389,7 @@ html, body {
 /* -- SVG wire layers -- */
 #wires, .wires-svg {
   position: absolute;
-  inset: 0;
+  inset: var(--pane-header-h) 0 0 0;
   width: 100%;
   height: 100%;
   pointer-events: none;
@@ -397,7 +399,7 @@ html, body {
 /* -- node container -- */
 #nodes {
   position: absolute;
-  inset: 0;
+  inset: var(--pane-header-h) 0 0 0;
   overflow: hidden;
   z-index: 1;
 }
@@ -405,7 +407,7 @@ html, body {
 /* -- flyer (flying token animations) -- */
 #flyer {
   position: absolute;
-  inset: 0;
+  inset: var(--pane-header-h) 0 0 0;
   pointer-events: none;
   z-index: 30;
 }
@@ -414,7 +416,7 @@ html, body {
 #totals {
   position: absolute;
   z-index: 15;
-  top: 4px;
+  top: calc(var(--pane-header-h) + 4px);
   left: 100px;
   display: flex;
   gap: 6px;
@@ -455,7 +457,7 @@ html, body {
 /* -- clock & uptime -- */
 #clock {
   position: absolute;
-  top: 4px;
+  top: calc(var(--pane-header-h) + 4px);
   right: 10px;
   z-index: 15;
   font-family: var(--font-mono);
@@ -466,7 +468,7 @@ html, body {
 
 #uptime {
   position: absolute;
-  top: 22px;
+  top: calc(var(--pane-header-h) + 22px);
   right: 10px;
   z-index: 15;
   display: block;
@@ -712,7 +714,7 @@ html, body {
 .board-section {
   position: absolute;
   z-index: 8;
-  top: 10px;
+  top: calc(var(--pane-header-h) + 10px);
   bottom: 152px;
   width: 160px;
   background: var(--panel);
